@@ -1,0 +1,46 @@
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                  LLM INFRASTRUCTURE CHEATSHEET                 ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+🚀 УСТАНОВКА
+  ./scripts/quick_start.sh        # Интерактивно
+  ./scripts/bootstrap_llm.sh      # Установка
+  source ~/.bashrc
+  ./scripts/configure_models.sh   # Конфигурация
+
+💡 ЗАПУСК МОДЕЛЕЙ
+  llm-manager start vllm --model <path> --port 8000
+  llm-manager start sglang --model-path <path> --port 8001
+  llm-select-model                # Список конфигураций
+  llm-select-model vllm_Vikhr-3-8B
+
+🎯 РАСПРЕДЕЛЕНИЕ ПО GPU
+  CUDA_VISIBLE_DEVICES=0 llm-manager start vllm --model <m1> --port 8000
+  CUDA_VISIBLE_DEVICES=1 llm-manager start sglang --model-path <m2> --port 8001
+  CUDA_VISIBLE_DEVICES=0,1 vllm --model <m3> --tensor-parallel-size 2 --port 8002
+
+📊 МОНИТОРИНГ
+  llm-manager status
+  nvidia-smi
+  tail -f ~/llm_engines/vllm.log
+  lsof -i :8000
+
+🛑 УПРАВЛЕНИЕ
+  llm-manager stop vllm
+  kill -9 $(cat ~/llm_engines/vllm.pid)
+
+🌐 API
+  curl http://localhost:8000/v1/models
+  curl -X POST http://localhost:8000/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{"model": "model", "prompt": "Hello", "max_tokens": 50}'
+
+🏥 HEALTHCHECK
+  cd ~/llm_bootstrap/healthchecks
+  ./healthcheck.sh > /dev/null 2>&1 &  # background
+  ./setup_healthcheck.sh               # systemd
+  systemctl --user start llm-healthcheck
+
+🔄 ОБНОВЛЕНИЕ
+  conda activate vllm_env && pip install --upgrade vllm
+  cd ~/llm_engines/llama.cpp && git pull && make clean && make LLAMA_CUDA=1 -j$(nproc)

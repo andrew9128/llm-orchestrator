@@ -1,0 +1,54 @@
+╔════════════════════════════════════════════════════════════════╗
+║     LLM Infrastructure Bootstrap - УСТАНОВКА                   ║
+╚════════════════════════════════════════════════════════════════╝
+
+🚀 УСТАНОВКА (3 шага):
+
+1. Запустить установку:
+   cd ~/llm_bootstrap
+   ./scripts/quick_start.sh
+   # Выбрать опцию 1
+
+или
+   ./start_llm.sh --auto
+
+2. Перезагрузить shell:
+   source ~/.bashrc
+
+3. Сконфигурировать модели:
+   ./scripts/configure_models.sh
+
+
+РУЧНОЙ РЕЖИМ:
+1. Установка окружения:
+   ./scripts/bootstrap_llm.sh --vllm --sglang --lmdeploy
+
+2. Скачивание конкретной модели:
+   ./scripts/bootstrap_llm.sh --download-models "Vikhrmodels/QVikhr-3-8B-Instruction"
+
+3. Генерация конфигураций:
+   ./scripts/configure_models.sh
+
+КОМАНДЫ УПРАВЛЕНИЯ:
+   llm-manager status       - Проверка процессов
+   ./scripts/auto_deploy.sh --status - Подробный статус API
+   ./scripts/auto_deploy.sh --stop   - Остановить все модели
+
+ИСПОЛЬЗОВАНИЕ:
+
+Запуск модели:
+  llm-select-model
+  llm-select-model vllm_QVikhr-3-8B-Instruction
+
+Healthcheck:
+  cd healthchecks
+  ./setup_healthcheck.sh
+  systemctl --user start llm-healthcheck
+
+Статус:
+  llm-manager status
+  nvidia-smi
+
+Документация:
+  docs/GPU_RECOMMENDATIONS.md - Рекомендации по моделям
+  docs/CHEATSHEET.txt - Шпаргалка команд

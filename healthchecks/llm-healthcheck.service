@@ -1,0 +1,14 @@
+[Unit]
+Description=LLM Models Healthcheck Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/llm_bootstrap/healthchecks/healthcheck.sh
+Restart=always
+RestartSec=30
+StandardOutput=append:%h/llm_engines/healthcheck.log
+StandardError=append:%h/llm_engines/healthcheck.error.log
+
+[Install]
+WantedBy=default.target
