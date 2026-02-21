@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+for cmd in bc jq curl nvidia-smi; do
+    if ! command -v $cmd &> /dev/null; then
+        log_error "Требуется: $cmd (sudo apt install $cmd)"
+        exit 1
+    fi
+done
+
 MODELS_DIR="${HOME}/llm_models"
 DEPLOY_STATE="${HOME}/llm_engines/deploy_state.txt"
-DEPLOYED_LIST=""
+#DEPLOYED_LIST=""
 
 log_info() { echo -e "\033[0;32m[INFO]\033[0m $*"; }
 log_warn() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
@@ -57,12 +64,13 @@ get_best_model_for_gpu() {
     local free_gb=$2
     local total_gb=$3
 
-    local available_models=$(ls -1 "$MODELS_DIR" 2>/dev/null || echo "")
+    local available_models
+    available_models=$(ls -1 "$MODELS_DIR" 2>/dev/null || echo "")
     if [ -z "$available_models" ]; then echo "none|none|0|0|auto|0"; return; fi
 
     # Умный поиск: ищем Nemo (12B), если нет — Vikhr (8B), если нет — любую
     local model="none"
-    if echo "$available_models" | grep -q "saiga_nemo_12b" && (( $(echo "$free_gb > 17.0" | bc -l) )); then
+    if echo "$available_models" | grep -q "saiga_nemo_12b" && [ "$(echo "$free_gb > 17.0" | bc -l)" = "1" ]; then
         model="saiga_nemo_12b"
     elif echo "$available_models" | grep -q "QVikhr-3-8B-Instruction"; then
         model="QVikhr-3-8B-Instruction"
@@ -70,9 +78,14 @@ get_best_model_for_gpu() {
         model=$(echo "$available_models" | head -1)
     fi
 
-    local params=$(echo "$model" | grep -oP '\d+(?=[Bb])' | head -1 || echo "8")
-    local weight_size=$(echo "$params * 2.0 + 1.2" | bc)
-    local kv_mem=$(echo "$free_gb - $weight_size" | bc)
+    local params
+    params=$(echo "$model" | grep -oP '\d+(?=[Bb])' | head -1 || echo "8")
+
+    local weight_size
+    weight_size=$(echo "$params * 2.0 + 1.2" | bc)
+
+    local kv_mem
+    kv_mem=$(echo "$free_gb - $weight_size" | bc)
 
     if (( $(echo "$kv_mem < 0.5" | bc -l) )); then echo "none|none|0|0|auto|0"; return; fi
 
@@ -80,7 +93,8 @@ get_best_model_for_gpu() {
     local kv_dtype="auto"; local tokens_factor=64000
     if (( $(echo "$kv_mem < 4.0" | bc -l) )); then kv_dtype="fp8"; tokens_factor=128000; fi
 
-    local calc_ctx=$(echo "($kv_mem * $tokens_factor) / $params" | bc | cut -d. -f1)
+    local calc_ctx
+    calc_ctx=$(echo "($kv_mem * $tokens_factor) / $params" | bc | cut -d. -f1)
 
     local ctx=2048
     for pwr in 4096 8192 16384 32768; do
@@ -88,9 +102,11 @@ get_best_model_for_gpu() {
     done
 
     # Сессии и лимит памяти
-    local mseq=$(echo "$free_gb * 2" | bc | cut -d. -f1)
+    local mseq
+    mseq=$(echo "$free_gb * 2" | bc | cut -d. -f1)
     [ "$mseq" -gt 64 ] && mseq=64
-    local util=$(echo "scale=2; ($free_gb - 0.5) / $total_gb" | bc)
+    local util
+    util=$(echo "scale=2; ($free_gb - 0.5) / $total_gb" | bc)
     [[ $util == .* ]] && util="0$util"
 
     echo "$model|none|$ctx|$util|$kv_dtype|$mseq"
@@ -135,26 +151,39 @@ get_next_free_port() {
 # Создание плана
 create_deployment_plan() {
     log_info "Создание плана развертывания..."
-    
-    local gpu_data=$(analyze_gpu)
+
+    local gpu_data
+    gpu_data=$(analyze_gpu) || { log_error "Не удалось проанализировать GPU"; exit 1; }
+
+    local gpu_data
+    gpu_data=$(analyze_gpu) || {
+        log_error "Не удалось получить данные по GPU"
+        exit 1
+    }
     
     if [ -z "$gpu_data" ]; then
         log_error "Нет доступных GPU"
         exit 1
     fi
     
-    local gpu_count=$(echo "$gpu_data" | wc -l)
+    local gpu_count
+    gpu_count=$(echo "$gpu_data" | wc -l)
+
     log_info "Доступно GPU: $gpu_count"
     
     # Создаем план в текстовом формате
     local port=8000
-    > /tmp/deployment_plan.txt
-    
+    : > /tmp/deployment_plan.txt
+
     echo "$gpu_data" | while IFS='|' read -r gpu_id name total_gb free_gb; do
         log_info "  GPU $gpu_id: $name - ${free_gb}GB свободно из ${total_gb}GB"
         
-        local category=$(classify_gpu "$total_gb")
-        local model_config=$(get_best_model_for_gpu "$(classify_gpu "$total_gb")" "$free_gb" "$total_gb")
+        local category
+        category=$(classify_gpu "$total_gb")
+
+        local model_config
+        model_config=$(get_best_model_for_gpu "$(classify_gpu "$total_gb")" "$free_gb" "$total_gb") \
+            || { log_error "Не удалось подобрать модель для GPU"; continue; }
 
         IFS='|' read -r model quant ctx util kv_dtype max_seqs <<< "$model_config"
 
@@ -163,7 +192,8 @@ create_deployment_plan() {
             continue
         fi
         
-        local engine=$(choose_engine "$model")
+        local engine
+        engine=$(choose_engine "$model")
         
         # Сохраняем в файл
         echo "$gpu_id|$name|$total_gb|$free_gb|$category|$model|$engine|$port|$quant|$ctx|$util|$kv_dtype|$max_seqs" >> /tmp/deployment_plan.txt
@@ -189,7 +219,7 @@ start_model() {
     local kv_dtype=$8
     local max_seqs=$9
 
-    local model_path="${MODELS_DIR}/${model}"
+#    local model_path="${MODELS_DIR}/${model}"
     local log_file="${HOME}/llm_engines/${engine}_gpu${gpu_id}.log"
     local pid_file="${HOME}/llm_engines/${engine}_gpu${gpu_id}.pid"
     
@@ -290,7 +320,7 @@ deploy_all() {
     # Подтверждение
     if [ "${AUTO_DEPLOY:-false}" != "true" ]; then
         echo ""
-        read -p "Начать развертывание? (y/N): " confirm
+        read -r -p "Начать развертывание? (y/N): " confirm
         if [ "$confirm" != "y" ]; then
             exit 0
         fi
@@ -307,21 +337,23 @@ deploy_all() {
     cp /tmp/deployment_plan.txt "$DEPLOY_STATE"
 
     # Создаем чистый JSON для Healthcheck
-    local json_file="${HOME}/llm_engines/deploy_state.json"
-    echo "{\"deployments\": [" > "$json_file"
-    local first=true
-    while IFS='|' read -r gid name tot free cat mod eng prt qnt ctx utl kv mseq; do
-        if [ "$first" = false ]; then echo "," >> "$json_file"; fi
-        echo "{\"gpu_id\": $gid, \"model\": \"$mod\", \"engine\": \"$eng\", \"port\": $prt, \"quantization\": \"$qnt\", \"max_context\": $ctx, \"gpu_memory_utilization\": $utl, \"kv_cache_dtype\": \"$kv\", \"max_num_seqs\": $mseq}" >> "$json_file"
-        first=false
-    done < "$DEPLOY_STATE"
-    echo "]}" >> "$json_file"
+    {
+        echo '{"deployments":['
+        local first=true
+        while IFS='|' read -r gpu_id name total_gb free_gb category model engine port quant ctx util kv_dtype max_seqs; do
+            [ "$first" = false ] && echo ","
+            jq -n --arg gi "$gpu_id" --arg m "$model" --arg e "$engine" --argjson p "$port" \
+                  --arg q "$quant" --argjson c "$ctx" --argjson u "$util" --arg k "$kv_dtype" --argjson ms "$max_seqs" \
+                  '{gpu_id: ($gi|tonumber), model: $m, engine: $e, port: $p, quantization: $q, max_context: $c, gpu_memory_utilization: $u, kv_cache_dtype: $k, max_num_seqs: $ms}'
+            first=false
+        done < "$DEPLOY_STATE"
+        echo ']}'
+    } > "${HOME}/llm_engines/deploy_state.json"
 
     log_info "Развертывание завершено!"
         echo ""
         echo "Статус: ./scripts/auto_deploy.sh --status"
     }
-
 # Статус
 show_status() {
     if [ ! -f "$DEPLOY_STATE" ]; then

@@ -224,13 +224,26 @@ download_models() {
         local folder=$(echo "$repo" | awk -F'/' '{print $NF}')
         local model_path="${HOME}/llm_models/${folder}"
 
+        local required_space=50 # GB
+        local available=$(df -BG "${HOME}" | awk 'NR==2 {print $4}' | sed 's/G//')
+        if [ "$available" -lt "$required_space" ]; then
+            log_error "Недостаточно места: ${available}GB (нужно ${required_space}GB)"
+            continue
+        fi
+
         log_info "Скачивание HF: $repo -> $folder..."
         mkdir -p "$model_path"
 
-        huggingface-cli download "$repo" \
+        # Скачивание с обработкой ошибок
+        if ! huggingface-cli download "$repo" \
             --local-dir "$model_path" \
             --local-dir-use-symlinks False \
-            #--quiet
+            --resume-download 2>&1 | tee "${HOME}/llm_engines/download_${folder}.log"; then
+            log_error "Ошибка скачивания $repo, см. логи"
+            continue
+        fi
+
+        log_info "✓ Скачано: $folder"
     done
 }
 
