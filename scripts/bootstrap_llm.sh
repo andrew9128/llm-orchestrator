@@ -52,7 +52,7 @@ while [[ $# -gt 0 ]]; do
         --lmdeploy) INSTALL_LMDEPLOY=true; shift ;;
         --llamacpp) INSTALL_LLAMACPP=true; shift ;;
         --ollama) INSTALL_OLLAMA=true; shift ;;
-        --all) 
+        --all)
             INSTALL_VLLM=true
             INSTALL_SGLANG=true
             INSTALL_LMDEPLOY=true
@@ -95,18 +95,18 @@ setup_directories() {
     mkdir -p "${HOME}/.cache/pip"
     mkdir -p "${HOME}/llm_engines"
     mkdir -p "${HOME}/llm_models"
-    
+
     if ! grep -q "${BIN_DIR}" ~/.bashrc 2>/dev/null; then
         echo "export PATH=\"${BIN_DIR}:\$PATH\"" >> ~/.bashrc
         echo "export LD_LIBRARY_PATH=\"${HOME}/.local/lib:\$LD_LIBRARY_PATH\"" >> ~/.bashrc
     fi
-    
+
     export PATH="${BIN_DIR}:$PATH"
 }
 
 install_miniconda() {
     log_info "Установка Miniconda..."
-    
+
     if [ -d "${HOME}/miniconda3" ]; then
         log_info "Miniconda уже установлен"
         source "${HOME}/miniconda3/bin/activate" 2>/dev/null || true
@@ -117,7 +117,7 @@ install_miniconda() {
         "${HOME}/miniconda3/bin/conda" init bash > /dev/null 2>&1
         source "${HOME}/miniconda3/bin/activate"
     fi
-    
+
     # Автоматически принимаем ToS если нужно
     if $AUTO_ACCEPT_TOS; then
         log_info "Принятие Conda ToS..."
@@ -132,14 +132,14 @@ install_miniconda() {
 
 create_vllm_env() {
     log_info "Создание окружения vLLM..."
-    
+
     source "${HOME}/miniconda3/bin/activate"
-    
+
     if conda env list | grep -q "vllm_env"; then
         log_info "vllm_env уже существует"
         return 0
     fi
-    
+
     conda create -n vllm_env python=3.11 -y -q
     conda activate vllm_env
     pip install -q vllm ray[default]
@@ -149,30 +149,24 @@ create_vllm_env() {
 create_sglang_env() {
     log_info "Подготовка окружения SGLang..."
     source "${HOME}/miniconda3/bin/activate"
-    
+
     if ! conda env list | grep -q "sglang_env"; then
         log_info "Создание нового conda окружения sglang_env..."
         conda create -n sglang_env python=3.11 -y -q
     fi
-    
+
     local env_pip="${HOME}/miniconda3/envs/sglang_env/bin/pip"
     local env_python="${HOME}/miniconda3/envs/sglang_env/bin/python"
-    
-    # Torch обязательно
+
     if ! $env_python -c "import torch" 2>/dev/null; then
         log_info "Установка Torch 2.5.1 (CUDA 12.1)..."
         $env_pip install torch==2.5.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
     fi
-    
-    # Удаляем старую версию
     $env_pip uninstall -y sglang 2>/dev/null || true
-    
-    # Клонируем репозиторий
     local sgl_src="${HOME}/sglang_src"
     rm -rf "$sgl_src"
     git clone https://github.com/sgl-project/sglang.git "$sgl_src"
-    
-    # Глобальный патч JIT-файлов
+
     log_info "Глобальный патч JIT: удаляем concepts, ranges, span, bit, version..."
     find "$sgl_src/python/sglang/jit_kernel" -type f \( -name "*.h" -o -name "*.cuh" -o -name "*.cu" \) | while read file; do
         sed -i '/#include <concepts>/d' "$file"
@@ -185,16 +179,16 @@ create_sglang_env() {
         sed -i '/std::is_convertible_v/d' "$file"
     done
     log_info "Патч JIT завершён — C++20 фичи удалены/заменены"
-    
+
     # Устанавливаем из python/
     log_info "Установка SGLang из исходников..."
     cd "$sgl_src/python"
     $env_pip install -e ".[all]" || { log_error "Установка провалилась"; exit 1; }
     cd -
-    
+
     # FlashInfer (опционально)
     $env_pip install flashinfer -U --find-links https://flashinfer.ai/whl/cu121/torch2.5/index.html || true
-    
+
     # Полностью отключаем JIT — удаляем всю директорию с JIT-ядрами
     JIT_DIR="${HOME}/miniconda3/envs/sglang_env/lib/python3.11/site-packages/sglang/jit_kernel"
     if [ -d "$JIT_DIR" ]; then
@@ -203,51 +197,40 @@ create_sglang_env() {
     else
         log_warn "JIT-директория не найдена — уже отключена"
     fi
-    
     log_info "SGLang установлен с патчем и отключённым JIT — готово!"
 }
 
 create_lmdeploy_env() {
     log_info "Создание окружения lmdeploy..."
-    
     source "${HOME}/miniconda3/bin/activate"
-    
     if conda env list | grep -q "lmdeploy_env"; then
-        log_info "lmdeploy_env уже существует"
+        log_info "lmdeploy_env уже существует — обновляем lmdeploy"
+        conda activate lmdeploy_env
+        pip install lmdeploy --upgrade -q
+        conda deactivate
         return 0
     fi
-    
+    log_info "Создаём новое окружение lmdeploy_env..."
     conda create -n lmdeploy_env python=3.11 -y -q
     conda activate lmdeploy_env
-    pip install -q lmdeploy
+    pip install lmdeploy --upgrade -q
     conda deactivate
-}
-
-install_llamacpp() {
-    log_info "Установка llama.cpp..."
-    cd "${HOME}/llm_engines"
-    [ -d "llama.cpp" ] || git clone -q https://github.com/ggerganov/llama.cpp.git
-    cd llama.cpp
-    log_info "Сборка llama.cpp с CMake..."
-    mkdir -p build && cd build
-    cmake .. -DLLAMA_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-    cmake --build . --config Release -j$(nproc)
-    ln -sf "${HOME}/llm_engines/llama.cpp/build/bin/llama-server" "${BIN_DIR}/llama-server"
+    log_info "lmdeploy установлен в lmdeploy_env"
 }
 
 install_ollama() {
     log_info "Установка Ollama..."
-    
+
     if [ -f "${BIN_DIR}/ollama" ]; then
         log_info "Ollama уже установлен"
         return 0
     fi
-    
+
     curl -sL https://ollama.com/download/ollama-linux-amd64 -o "${BIN_DIR}/ollama"
     chmod +x "${BIN_DIR}/ollama"
-    
+
     mkdir -p "${HOME}/.ollama/models"
-    
+
     if ! grep -q "OLLAMA_MODELS" ~/.bashrc 2>/dev/null; then
         echo "export OLLAMA_MODELS=\"${HOME}/.ollama/models\"" >> ~/.bashrc
     fi
@@ -293,7 +276,7 @@ download_models() {
 
 create_launcher_scripts() {
     log_info "Создание launcher-скриптов..."
-    
+
     if $INSTALL_VLLM; then
         cat > "${BIN_DIR}/launch_vllm" << 'SCRIPT'
 #!/usr/bin/env bash
@@ -302,7 +285,7 @@ exec python -m vllm.entrypoints.openai.api_server "$@"
 SCRIPT
         chmod +x "${BIN_DIR}/launch_vllm"
     fi
-    
+
     if $INSTALL_SGLANG; then
         cat > "${BIN_DIR}/launch_sglang" << 'SCRIPT'
 #!/usr/bin/env bash
@@ -311,7 +294,7 @@ exec python -m sglang.launch_server "$@"
 SCRIPT
         chmod +x "${BIN_DIR}/launch_sglang"
     fi
-    
+
     if $INSTALL_LMDEPLOY; then
         cat > "${BIN_DIR}/launch_lmdeploy" << 'SCRIPT'
 #!/usr/bin/env bash
@@ -324,7 +307,7 @@ SCRIPT
 
 create_management_script() {
     log_info "Создание llm-manager..."
-    
+
     cat > "${BIN_DIR}/llm-manager" << 'SCRIPT'
 #!/usr/bin/env bash
 
@@ -350,7 +333,7 @@ HELP
 start_engine() {
     local engine=$1
     shift
-    
+
     case "$engine" in
         vllm)
             launch_vllm "$@" > ~/llm_engines/vllm.log 2>&1 &
@@ -391,7 +374,7 @@ start_engine() {
 stop_engine() {
     local engine=$1
     local pidfile=~/llm_engines/${engine}.pid
-    
+
     if [ -f "$pidfile" ]; then
         local pid=$(cat "$pidfile")
         if kill -0 "$pid" 2>/dev/null; then
@@ -459,23 +442,23 @@ SUMMARY
 main() {
     log_info "Начало установки LLM инфраструктуры..."
     log_info "Выбрано: vLLM=$INSTALL_VLLM, SGLang=$INSTALL_SGLANG, lmdeploy=$INSTALL_LMDEPLOY, llama.cpp=$INSTALL_LLAMACPP, Ollama=$INSTALL_OLLAMA"
-    
+
     check_gpu || log_warn "Продолжаем без GPU"
-    
+
     setup_directories
     install_miniconda
-    
+
     if $INSTALL_VLLM; then create_vllm_env; fi
     if $INSTALL_SGLANG; then create_sglang_env; fi
     if $INSTALL_LMDEPLOY; then create_lmdeploy_env; fi
     if $INSTALL_LLAMACPP; then install_llamacpp; fi
     if $INSTALL_OLLAMA; then install_ollama; fi
-    
+
     if $DOWNLOAD_MODELS; then download_models; fi
-    
+
     create_launcher_scripts
     create_management_script
-    
+
     print_summary
 }
 

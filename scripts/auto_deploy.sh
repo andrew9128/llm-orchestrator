@@ -79,83 +79,43 @@ analyze_gpu() {
 # Возвращает: model|params_b
 
 get_best_model() {
-    local category=$1
+    local category="${1:-}"
     local available
     available=$(ls -1 "$MODELS_DIR" 2>/dev/null || true)
-
     if [ -z "$available" ]; then echo "none|0"; return; fi
 
-    # Функция поиска первой совпадающей модели
     find_model() {
-        local patterns=("$@")
-        for pat in "${patterns[@]}"; do
-            local found
-            found=$(echo "$available" | grep -i "$pat" | head -1 || true)
+        for pat in "$@"; do
+            local found=$(echo "$available" | grep -iP "$pat" | head -1 || true)
             if [ -n "$found" ]; then echo "$found"; return; fi
         done
-        echo ""
     }
 
     local model=""
     local params=8
-
     case "$category" in
         "12gb")
-            # Сетап 1: 12GB (5070) → 4B или 7B русские модели
-            # Vikhr-4B — первый приоритет, потом 7B если влезает
-            model=$(find_model \
-                "QVikhr-3-4B" "Vikhr.*4[Bb]" \
-                "saiga.*7b" "Vikhr.*7[Bb]" \
-                "saiga_mistral_7b" "saiga_llama.*7b")
-            [ -z "$model" ] && model=$(echo "$available" | head -1)
-            # Определяем размер
-            params=$(echo "$model" | grep -oiP '\d+(?=[Bb])' | head -1 || echo "4")
-            ;;
-
+            model=$(find_model "QVikhr-3-4B-Instruction" "QVikhr-3-4B" "saiga_mistral_7b")
+            params=4 ;;
         "16gb")
-            # Сетап 2: 16GB → 8B русские модели (Vikhr-8B, Saiga-8B)
-            model=$(find_model \
-                "QVikhr-3-8B" "Vikhr.*8[Bb]" \
-                "saiga.*8b" "saiga_llama3_8b" \
-                "saiga_llama.*8b")
-            # Fallback на 7B если нет 8B
-            [ -z "$model" ] && model=$(find_model \
-                "saiga.*7b" "saiga_mistral_7b" "Vikhr.*7[Bb]")
-            [ -z "$model" ] && model=$(echo "$available" | head -1)
-            params=$(echo "$model" | grep -oiP '\d+(?=[Bb])' | head -1 || echo "8")
-            ;;
-
+            model=$(find_model "QVikhr-3-8B" "saiga_llama3_8b")
+            params=8 ;;
         "24gb")
-            # Сетап 3: 24GB (A5000/Titan) → 12B модели, Saiga-Nemo приоритет
-            model=$(find_model \
-                "saiga_nemo_12b" "saiga.*nemo.*12" \
-                "saiga_gemma3_12b" "saiga.*12b" \
-                "Vikhr.*12[Bb]")
-            # Fallback на 8B
-            [ -z "$model" ] && model=$(find_model \
-                "QVikhr-3-8B" "saiga_llama3_8b" "saiga.*8b")
-            [ -z "$model" ] && model=$(echo "$available" | head -1)
-            params=$(echo "$model" | grep -oiP '\d+(?=[Bb])' | head -1 || echo "12")
-            ;;
-
+            model=$(find_model "saiga_nemo_12b" "saiga_gemma3_12b")
+            params=12 ;;
         "32gb")
-            # Сетап 4: 32GB+ → тяжелые веса / большой контекст
-            # Приоритет на самую крупную русскую модель
-            model=$(find_model \
-                "saiga_nemo_12b" "saiga.*nemo" \
-                "saiga_gemma3_12b" "saiga.*12b" \
-                "Vikhr.*12[Bb]" \
-                "QVikhr-3-8B" "saiga.*8b")
-            [ -z "$model" ] && model=$(echo "$available" | head -1)
-            params=$(echo "$model" | grep -oiP '\d+(?=[Bb])' | head -1 || echo "12")
-            ;;
-
-        *)
-            echo "none|0"; return ;;
+            model=$(find_model "saiga_gemma3_27b" "saiga_nemo_12b")
+            params=27 ;;
     esac
 
-    if [ -z "$model" ]; then echo "none|0"; return; fi
+    [ -z "$model" ] && model=$(echo "$available" | head -1)
     echo "$model|$params"
+}
+
+is_port_free() {
+    local port=$1
+    python3 -c "import socket; s = socket.socket(socket.socket.AF_INET, socket.SOCK_STREAM); exit(s.connect_ex(('127.0.0.1', $port)))" >/dev/null 2>&1
+    if [ $? -eq 0 ]; then return 1; else return 0; fi
 }
 
 # ============================================================================
@@ -172,18 +132,16 @@ get_best_model() {
 # Возвращает: quant|ctx|util|kv_dtype|max_seqs
 
 calc_launch_params() {
-    local category=$1
-    local params=$2       # размер модели в B (4, 7, 8, 12, ...)
-    local free_gb=$3      # реально свободно прямо сейчас
-    local total_gb=$4
-
+    local category="${1:-}"
+    local params="${2:-0}"
+    local free_gb="${3:-0}"
+    local total_gb="${4:-0}"
     # ── 1. Выбираем квантизацию и считаем вес модели ──────────────────────
     local quant="none"
-    local bytes_per_param="2.0"   # fp16 по умолчанию
+    local bytes_per_param="2.0"
 
     case "$category" in
         "12gb")
-            # 12GB: 4B-fp16=8GB, 7B-fp16=14GB (не влезет) → 7B нужен fp8
             if [ "$params" -ge 7 ]; then
                 quant="fp8"; bytes_per_param="1.0"
             else
@@ -191,7 +149,6 @@ calc_launch_params() {
             fi
             ;;
         "16gb")
-            # 16GB: 8B-fp16=16GB (встык!) → fp8 обязательно → 8GB
             quant="fp8"; bytes_per_param="1.0"
             ;;
         "24gb")
@@ -199,7 +156,6 @@ calc_launch_params() {
             bytes_per_param="1.0"
             ;;
         "32gb")
-            # 32GB: 12B-fp16=24GB — влезает без квантизации
             if [ "$params" -ge 30 ]; then
                 quant="fp8"; bytes_per_param="1.0"
             else
@@ -227,7 +183,7 @@ calc_launch_params() {
     else
         overhead_gb=1.8
     fi
-    # ── 4. Реально доступно для KV-cache ──────────────────────────────────
+
     local kv_budget
     kv_budget=$(echo "scale=2; $free_gb - $weight_gb - $overhead_gb" | bc)
 
@@ -238,14 +194,12 @@ calc_launch_params() {
         echo "none|0|0|auto|0"; return
     fi
 
-    # ── 5. Тип KV-cache ───────────────────────────────────────────────────
-    # fp8 KV экономит ~2x памяти, включаем если KV budget < 3GB
     local kv_dtype="auto"
     if [ "$(echo "$kv_budget < 2.5" | bc)" -eq 1 ]; then
         kv_dtype="fp8_e5m2"
         log_info " KV budget мал (${kv_budget}GB) → kv_dtype=fp8_e5m2" >&2
     fi
-    # ── 6. Контекст ───────────────────────────────────────────────────────
+
     # Оцениваем max_ctx из KV budget:
     # KV per token ≈ 2 * n_layers * n_heads * head_dim * 2 bytes (fp16)
     # Для 8B Qwen/Llama-style: ~0.5MB/token (fp16), ~0.25MB/token (fp8)
@@ -254,16 +208,16 @@ calc_launch_params() {
     #   fp8:  ~0.25 MB/tok для 8B, ~0.375 для 12B
     local mb_per_token
     if [ "$kv_dtype" = "fp8_e5m2" ]; then
-        mb_per_token=$(echo "scale=4; $params * 0.018" | bc)   # ≈0.144 MB/tok для 8B fp8 — реалистично
+        mb_per_token=$(echo "scale=4; $params * 0.018" | bc)
     else
-        mb_per_token=$(echo "scale=4; $params * 0.040" | bc)   # ≈0.32 MB/tok для fp16
+        mb_per_token=$(echo "scale=4; $params * 0.040" | bc)
     fi
 
     local kv_budget_mb
     kv_budget_mb=$(echo "scale=0; $kv_budget * 1024" | bc | cut -d. -f1)
 
     local max_ctx_calc
-    max_ctx_calc=$(echo "scale=0; ($kv_budget_mb / $mb_per_token) * 1.6" | bc | cut -d. -f1 2>/dev/null || echo "4096")
+    max_ctx_calc=$(echo "scale=0; ($kv_budget_mb / $mb_per_token) * 2.0" | bc | cut -d. -f1)
 
     max_ctx_calc=${max_ctx_calc%%.*}
 
@@ -275,7 +229,7 @@ calc_launch_params() {
 
     # Ограничения по сценарию
     case "$category" in
-        "12gb") [ "$ctx" -gt  8192 ] && ctx=8192  ;;
+        "12gb") [ "$ctx" -gt 16384 ] && ctx=16384 ;;
         "16gb") [ "$ctx" -gt 16384 ] && ctx=16384 ;;
         "24gb") [ "$ctx" -gt 16384 ] && ctx=16384 ;;
         "32gb") [ "$ctx" -gt 32768 ] && ctx=32768 ;;
@@ -283,7 +237,6 @@ calc_launch_params() {
 
     log_info "  Расчётный контекст: max_ctx_calc=${max_ctx_calc} → ctx=${ctx}" >&2
 
-    # ── 7. gpu_memory_utilization (util) ──────────────────────────────────
     # util = сколько от TOTAL GPU памяти отдать движку.
     # Формула: (free_gb - safety_reserve) / total_gb
     # safety_reserve: буфер чтобы не словить OOM при пиковых нагрузках
@@ -291,7 +244,6 @@ calc_launch_params() {
     local util
     util=$(echo "scale=2; ($free_gb - $safety_gb) / $total_gb" | bc)
 
-    # Добавляем 0 если начинается с точки
     [[ $util == .* ]] && util="0${util}"
 
     # Зажимаем в разумные пределы [0.50 … 0.92]
@@ -300,7 +252,6 @@ calc_launch_params() {
 
     log_info "  gpu_memory_utilization = (${free_gb} - ${safety_gb}) / ${total_gb} = ${util}" >&2
 
-    # ── 8. Параллельные запросы ───────────────────────────────────────────
     # Исходим из KV budget: каждый запрос резервирует ~ctx/2 токенов
     # max_seqs ≈ kv_budget_mb / (ctx/2 * mb_per_token)
     local half_ctx=$(( ctx / 2 ))
@@ -402,7 +353,7 @@ create_deployment_plan() {
         local sgl_util="$util"
 
         if [ "$engine" = "sglang" ]; then
-            sgl_util=$(echo "scale=2; $util + 0.12" | bc)   # +0.12 для SGLang, чтобы дать больше памяти
+            sgl_util=$(echo "scale=2; $util + 0.12" | bc)
             [[ $sgl_util == .* ]] && sgl_util="0${sgl_util}"
             [ "$(echo "$sgl_util > 0.92" | bc)" -eq 1 ] && sgl_util="0.92"
             [ "$(echo "$sgl_util < 0.80" | bc)" -eq 1 ] && sgl_util="0.80"
@@ -440,44 +391,34 @@ start_model() {
     mkdir -p "${HOME}/llm_engines"
 
     log_info "GPU $gpu_id: Запуск $model ($engine)"
-    log_info "  → Порт: $port | ctx: $ctx | util: $util | kv: $kv_dtype | seqs: $max_seqs | quant: $quant"
+    log_info "  → Порт: $port | ctx: $ctx | util: $util | kv: $kv_dtype | seqs: $max_seqs"
 
     case "$engine" in
         "vllm")
-            local batch_tokens=$(( ctx / 2 ))
-            [ "$batch_tokens" -lt 2048  ] && batch_tokens=2048
-            [ "$batch_tokens" -gt 16384 ] && batch_tokens=16384
-
-            # Строим флаг квантизации
-            local quant_flag=""
-
+            # Для vLLM используем чистый util, а не sgl_util
             CUDA_VISIBLE_DEVICES=$gpu_id bash -c "
-                source '${HOME}/miniconda3/bin/activate' vllm_env
+                source ${HOME}/miniconda3/bin/activate vllm_env
                 python -m vllm.entrypoints.openai.api_server \
                     --model '${model_path}' \
                     --port ${port} \
                     --max-model-len ${ctx} \
-                    --max-num-batched-tokens ${batch_tokens} \
-                    --max-num-seqs ${max_seqs} \
-                    --mem-fraction-static ${sgl_util}
+                    --gpu-memory-utilization ${util} \
                     --kv-cache-dtype ${kv_dtype} \
-                    ${quant_flag} \
+                    --max-num-batched-tokens ${ctx} \
+                    --max-num-seqs ${max_seqs} \
                     --enable-chunked-prefill \
                     --trust-remote-code \
                     --dtype auto \
+                    --enforce-eager \
                     > '${log_file}' 2>&1 &
                 echo \$! > '${pid_file}'
             "
             ;;
         "sglang")
             local sgl_kv="$kv_dtype"
-            if [ "$sgl_kv" = "auto" ]; then
-                sgl_kv="bf16"  # bf16 — безопасно
-            fi
+            [ "$sgl_kv" = "auto" ] && sgl_kv="fp8_e5m2"
             CUDA_VISIBLE_DEVICES=$gpu_id bash -c "
-                source '${HOME}/miniconda3/bin/activate' sglang_env
-                export SGLANG_DISABLE_JIT=1
-                export TVM_DISABLE_JIT=1
+                source ${HOME}/miniconda3/bin/activate sglang_env
                 python -m sglang.launch_server \
                     --model-path '${model_path}' \
                     --port ${port} \
@@ -485,33 +426,34 @@ start_model() {
                     --mem-fraction-static ${sgl_util} \
                     --kv-cache-dtype ${sgl_kv} \
                     --max-running-requests ${max_seqs} \
-                    --chunked-prefill-size 2048 \
-                    --disable-cuda-graph \
-                    --attention-backend torch_native \
-                    --prefill-attention-backend torch_native \
-                    --decode-attention-backend torch_native \
-                    --sampling-backend pytorch \
-                    --disable-radix-cache \
+                    --attention-backend triton \
                     --trust-remote-code \
                     > '${log_file}' 2>&1 &
                 echo \$! > '${pid_file}'
             "
             ;;
         "lmdeploy")
+            local raw_mem=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "$gpu_id" | tr -d '[:space:]')
+            local safe_lm_util="0.2"
+            if [ "$raw_mem" -ge 20000 ]; then safe_lm_util="0.8"; fi
+
+            log_info "GPU $gpu_id: Blackwell Detect. Запуск LMDeploy (PyTorch Backend)"
             CUDA_VISIBLE_DEVICES=$gpu_id bash -c "
-                source '${HOME}/miniconda3/bin/activate' lmdeploy_env
-                lmdeploy serve api_server '${model_path}' \
+                source ${HOME}/miniconda3/bin/activate lmdeploy_env
+                python -m lmdeploy serve api_server '${model_path}' \
+                    --backend pytorch \
                     --server-port ${port} \
+                    --session-len ${ctx} \
+                    --cache-max-entry-count ${safe_lm_util} \
+                    --model-name ${model} \
                     --tp 1 \
-                    --cache-max-entry-count ${util} \
-                    --trust-remote-code \
+                    --log-level INFO \
                     > '${log_file}' 2>&1 &
                 echo \$! > '${pid_file}'
             "
             ;;
     esac
-
-    sleep 3
+    sleep 2
 }
 
 # ============================================================================
