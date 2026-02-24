@@ -80,34 +80,27 @@ analyze_gpu() {
 
 get_best_model() {
     local category="${1:-}"
-    local available
-    available=$(ls -1 "$MODELS_DIR" 2>/dev/null || true)
+    local available=$(ls -1 "$MODELS_DIR" 2>/dev/null || true)
     if [ -z "$available" ]; then echo "none|0"; return; fi
-
-    find_model() {
-        for pat in "$@"; do
-            local found=$(echo "$available" | grep -iP "$pat" | head -1 || true)
-            if [ -n "$found" ]; then echo "$found"; return; fi
-        done
-    }
 
     local model=""
     local params=8
+
     case "$category" in
-        "12gb")
-            model=$(find_model "QVikhr-3-4B-Instruction" "QVikhr-3-4B" "saiga_mistral_7b")
+        "12gb") # Setup 1 (5070)
+            model=$(echo "$available" | grep -E "QVikhr-3-4B|saiga_mistral_7b" | head -1)
             params=4 ;;
-        "16gb")
-            model=$(find_model "QVikhr-3-8B" "saiga_llama3_8b")
+        "16gb") # Setup 2 (A4000)
+            model=$(echo "$available" | grep -E "QVikhr-3-8B|saiga_llama3_8b" | head -1)
             params=8 ;;
-        "24gb")
-            model=$(find_model "saiga_nemo_12b" "saiga_gemma3_12b")
+        "24gb") # Setup 3 (A5000/Titan)
+            model=$(echo "$available" | grep "saiga_nemo_12b" | head -1)
+            [ -z "$model" ] && model=$(echo "$available" | grep "QVikhr-3-8B" | head -1)
             params=12 ;;
-        "32gb")
-            model=$(find_model "saiga_gemma3_27b" "saiga_nemo_12b")
+        "32gb") # Setup 4 (A6000)
+            model=$(echo "$available" | grep -E "saiga_gemma3_27b|saiga_nemo_12b" | head -1)
             params=27 ;;
     esac
-
     [ -z "$model" ] && model=$(echo "$available" | head -1)
     echo "$model|$params"
 }
@@ -117,7 +110,157 @@ is_port_free() {
     python3 -c "import socket; s = socket.socket(socket.socket.AF_INET, socket.SOCK_STREAM); exit(s.connect_ex(('127.0.0.1', $port)))" >/dev/null 2>&1
     if [ $? -eq 0 ]; then return 1; else return 0; fi
 }
+# ============================================================================
+# ПРОВЕРКА КОМПЛЕКТНОСТИ МОДЕЛИ
+# ============================================================================
 
+check_model_complete() {
+    local model_path="$1"
+
+    # Обязательные файлы токенайзера
+    local required_tokenizer=false
+    if [ -f "${model_path}/tokenizer.json" ] || \
+       [ -f "${model_path}/tokenizer.model" ] || \
+       [ -f "${model_path}/vocab.json" ]; then
+        required_tokenizer=true
+    fi
+
+    # Хотя бы один шард модели
+    local has_weights=false
+    if ls "${model_path}"/model-*.safetensors 2>/dev/null | head -1 | grep -q .; then
+        has_weights=true
+    fi
+    if ls "${model_path}"/*.bin 2>/dev/null | head -1 | grep -q .; then
+        has_weights=true
+    fi
+
+    # Считаем сколько шардов есть vs сколько должно быть
+    if $has_weights; then
+        local expected=1
+        if [ -f "${model_path}/model.safetensors.index.json" ]; then
+            expected=$(python3 -c "
+import json
+d = json.load(open('${model_path}/model.safetensors.index.json'))
+files = set(d['weight_map'].values())
+print(len(files))
+" 2>/dev/null || echo "0")
+        fi
+
+        local actual
+        actual=$(ls "${model_path}"/model-*.safetensors 2>/dev/null | wc -l)
+
+        if [ "$expected" -gt 1 ] && [ "$actual" -lt "$expected" ]; then
+            log_warn "  Модель неполная: найдено ${actual}/${expected} шардов" >&2
+            echo "incomplete"
+            return
+        fi
+    fi
+
+    if ! $required_tokenizer || ! $has_weights; then
+        log_warn "  Отсутствуют обязательные файлы (tokenizer или веса)" >&2
+        echo "incomplete"
+        return
+    fi
+
+    echo "ok"
+}
+
+# ============================================================================
+# ЗАГРУЗКА МОДЕЛИ С HUGGINGFACE
+# ============================================================================
+
+KNOWN_MODELS=(
+    "12gb:Vikhrmodels/QVikhr-3-4B-Instruction:QVikhr-3-4B-Instruction"
+    "12gb:IlyaGusev/saiga_mistral_7b:saiga_mistral_7b"
+    "16gb:Vikhrmodels/QVikhr-3-8B-Instruction:QVikhr-3-8B-Instruction"
+    "16gb:IlyaGusev/saiga_llama3_8b:saiga_llama3_8b"
+    "24gb:IlyaGusev/saiga_nemo_12b:saiga_nemo_12b"
+    "24gb:Vikhrmodels/QVikhr-3-8B-Instruction:QVikhr-3-8B-Instruction"
+    "32gb:IlyaGusev/saiga_gemma3_27b:saiga_gemma3_27b"
+    "32gb:IlyaGusev/saiga_nemo_12b:saiga_nemo_12b"
+)
+
+get_hf_repo_for_model() {
+    local folder="$1"
+    for entry in "${KNOWN_MODELS[@]}"; do
+        local repo folder_name
+        repo=$(echo "$entry"   | cut -d: -f2)
+        folder_name=$(echo "$entry" | cut -d: -f3)
+        if [ "$folder_name" = "$folder" ]; then
+            echo "$repo"
+            return
+        fi
+    done
+    echo ""
+}
+
+download_model() {
+    local repo="$1"
+    local model_path="$2"
+
+    log_info "  Скачивание модели: $repo → $model_path"
+
+    # Устанавливаем huggingface-hub если нет
+    if ! command -v huggingface-cli &>/dev/null; then
+        "${HOME}/miniconda3/bin/python" -m pip install -q huggingface-hub[cli] hf_transfer
+    fi
+
+    export HF_HUB_ENABLE_HF_TRANSFER=1
+    mkdir -p "$model_path"
+
+    if ! huggingface-cli download "$repo" \
+        --local-dir "$model_path" \
+        --local-dir-use-symlinks False \
+        --resume-download; then
+        log_error "  Ошибка скачивания $repo"
+        return 1
+    fi
+
+    log_info "  ✓ Загружено: $repo"
+}
+
+# ============================================================================
+# ОБЕСПЕЧЕНИЕ НАЛИЧИЯ МОДЕЛИ (проверка + загрузка при необходимости)
+# ============================================================================
+
+ensure_model() {
+    local model="$1"
+    local model_path="${MODELS_DIR}/${model}"
+
+    if [ ! -d "$model_path" ]; then
+        log_warn "Модель не найдена локально: $model"
+    else
+        local status
+        status=$(check_model_complete "$model_path")
+        if [ "$status" = "ok" ]; then
+            log_info "  Модель готова: $model"
+            return 0
+        fi
+        log_warn "  Модель повреждена или неполная: $model"
+    fi
+
+    # Ищем HF репозиторий
+    local repo
+    repo=$(get_hf_repo_for_model "$model")
+
+    if [ -z "$repo" ]; then
+        log_error "  Не знаем откуда скачать: $model (добавьте в KNOWN_MODELS)"
+        return 1
+    fi
+
+    if [ "${AUTO_DEPLOY}" = "true" ]; then
+        log_info "  AUTO_DEPLOY=true → скачиваем автоматически"
+        download_model "$repo" "$model_path"
+    else
+        read -r -p "  Скачать $model с HuggingFace? ($repo) [y/N]: " yn
+        if [ "$yn" = "y" ] || [ "$yn" = "Y" ]; then
+            download_model "$repo" "$model_path"
+        else
+            log_error "  Модель пропущена"
+            return 1
+        fi
+    fi
+}
 # ============================================================================
 # РАСЧЁТ ПАРАМЕТРОВ ЗАПУСКА
 # ============================================================================
@@ -269,16 +412,44 @@ calc_launch_params() {
 
 choose_engine() {
     local preferred="${ENGINE_TYPE}"
+    local category="${1:-24gb}"
+    local tp_size="${2:-1}"
 
     if [ "$preferred" = "auto" ]; then
-        # Приоритет: vllm → sglang → lmdeploy
-        if   [ -d "${HOME}/miniconda3/envs/vllm_env"     ]; then echo "vllm"
-        elif [ -d "${HOME}/miniconda3/envs/sglang_env"   ]; then echo "sglang"
-        elif [ -d "${HOME}/miniconda3/envs/lmdeploy_env" ]; then echo "lmdeploy"
-        else
-            log_error "Ни один движок не установлен!" >&2
-            exit 1
+        local has_vllm=false
+        local has_sglang=false
+        local has_lmdeploy=false
+        [ -d "${HOME}/miniconda3/envs/vllm_env"     ] && has_vllm=true
+        [ -d "${HOME}/miniconda3/envs/sglang_env"   ] && has_sglang=true
+        [ -d "${HOME}/miniconda3/envs/lmdeploy_env" ] && has_lmdeploy=true
+
+        # Multi-GPU (TP > 1) → lmdeploy лучший выбор
+        if [ "$tp_size" -gt 1 ]; then
+            if $has_lmdeploy; then echo "lmdeploy"; return; fi
+            if $has_vllm;     then echo "vllm";     return; fi
         fi
+
+        # 32gb+ → vLLM (лучший throughput на больших моделях)
+        if [ "$category" = "32gb" ]; then
+            if $has_vllm;     then echo "vllm";    return; fi
+            if $has_sglang;   then echo "sglang";  return; fi
+            if $has_lmdeploy; then echo "lmdeploy";return; fi
+        fi
+
+        # 24gb → sglang (быстрее на среднем throughput)
+        if [ "$category" = "24gb" ]; then
+            if $has_sglang;   then echo "sglang";  return; fi
+            if $has_vllm;     then echo "vllm";    return; fi
+            if $has_lmdeploy; then echo "lmdeploy";return; fi
+        fi
+
+        # 16gb и меньше → vLLM (стабильнее на малой памяти)
+        if $has_vllm;     then echo "vllm";     return; fi
+        if $has_sglang;   then echo "sglang";   return; fi
+        if $has_lmdeploy; then echo "lmdeploy"; return; fi
+
+        log_error "Ни один движок не установлен!" >&2
+        exit 1
     else
         if [ -d "${HOME}/miniconda3/envs/${preferred}_env" ]; then
             echo "$preferred"
@@ -346,7 +517,7 @@ create_deployment_plan() {
         fi
 
         local engine
-        engine=$(choose_engine)
+        engine=$(choose_engine "$category" "1")
 
         # SGLang использует mem_fraction_static вместо util,
         # поэтому для него дополнительно снижаем на 0.05 (его overhead выше)
@@ -416,17 +587,25 @@ start_model() {
             ;;
         "sglang")
             local sgl_kv="$kv_dtype"
-            [ "$sgl_kv" = "auto" ] && sgl_kv="fp8_e5m2"
+            [ "$sgl_kv" == "fp8" ] && sgl_kv="fp8_e5m2"
+            [ "$sgl_kv" == "auto" ] && sgl_kv="bf16"
+
+            log_info "GPU $gpu_id: Динамический старт SGLang ($model)"
             CUDA_VISIBLE_DEVICES=$gpu_id bash -c "
                 source ${HOME}/miniconda3/bin/activate sglang_env
+                export CC=${HOME}/miniconda3/envs/sglang_env/bin/x86_64-conda-linux-gnu-gcc
+                export CXX=${HOME}/miniconda3/envs/sglang_env/bin/x86_64-conda-linux-gnu-g++
                 python -m sglang.launch_server \
                     --model-path '${model_path}' \
                     --port ${port} \
                     --context-length ${ctx} \
-                    --mem-fraction-static ${sgl_util} \
+                    --mem-fraction-static 0.80 \
                     --kv-cache-dtype ${sgl_kv} \
                     --max-running-requests ${max_seqs} \
+                    --tokenizer-mode auto \
                     --attention-backend triton \
+                    --sampling-backend pytorch \
+                    --disable-cuda-graph \
                     --trust-remote-code \
                     > '${log_file}' 2>&1 &
                 echo \$! > '${pid_file}'
@@ -501,7 +680,11 @@ deploy_all() {
     log_info "Запуск моделей..."
 
     while IFS='|' read -r gpu_id name total_gb free_gb category model params engine port quant ctx util sgl_util kv_dtype max_seqs; do
-        start_model "$gpu_id" "$model" "$engine" "$port" "$quant" "$ctx" "$util" "$sgl_util" "$kv_dtype" "$max_seqs"
+        if ensure_model "$model"; then
+            start_model "$gpu_id" "$model" "$engine" "$port" "$quant" "$ctx" "$util" "$sgl_util" "$kv_dtype" "$max_seqs"
+        else
+            log_error "GPU $gpu_id: пропускаем запуск — модель $model недоступна"
+        fi
     done < /tmp/deployment_plan.txt
 
     cp /tmp/deployment_plan.txt "$DEPLOY_STATE"
