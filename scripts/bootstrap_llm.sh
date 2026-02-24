@@ -147,20 +147,64 @@ create_vllm_env() {
 }
 
 create_sglang_env() {
-    log_info "Создание окружения SGLang..."
-    
+    log_info "Подготовка окружения SGLang..."
     source "${HOME}/miniconda3/bin/activate"
     
-    if conda env list | grep -q "sglang_env"; then
-        log_info "sglang_env уже существует"
-        return 0
+    if ! conda env list | grep -q "sglang_env"; then
+        log_info "Создание нового conda окружения sglang_env..."
+        conda create -n sglang_env python=3.11 -y -q
     fi
     
-    conda create -n sglang_env python=3.11 -y -q
-    conda activate sglang_env
-    pip install -q "sglang[all]"
-    pip install -q flashinfer -i https://flashinfer.ai/whl/cu121/torch2.4/ 2>/dev/null || true
-    conda deactivate
+    local env_pip="${HOME}/miniconda3/envs/sglang_env/bin/pip"
+    local env_python="${HOME}/miniconda3/envs/sglang_env/bin/python"
+    
+    # Torch обязательно
+    if ! $env_python -c "import torch" 2>/dev/null; then
+        log_info "Установка Torch 2.5.1 (CUDA 12.1)..."
+        $env_pip install torch==2.5.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+    fi
+    
+    # Удаляем старую версию
+    $env_pip uninstall -y sglang 2>/dev/null || true
+    
+    # Клонируем репозиторий
+    local sgl_src="${HOME}/sglang_src"
+    rm -rf "$sgl_src"
+    git clone https://github.com/sgl-project/sglang.git "$sgl_src"
+    
+    # Глобальный патч JIT-файлов
+    log_info "Глобальный патч JIT: удаляем concepts, ranges, span, bit, version..."
+    find "$sgl_src/python/sglang/jit_kernel" -type f \( -name "*.h" -o -name "*.cuh" -o -name "*.cu" \) | while read file; do
+        sed -i '/#include <concepts>/d' "$file"
+        sed -i '/#include <ranges>/d' "$file"
+        sed -i '/#include <span>/d' "$file"
+        sed -i '/#include <bit>/d' "$file"
+        sed -i '/#include <version>/d' "$file"
+        sed -i '/std::enable_if_t/d' "$file"
+        sed -i '/if constexpr/d' "$file"
+        sed -i '/std::is_convertible_v/d' "$file"
+    done
+    log_info "Патч JIT завершён — C++20 фичи удалены/заменены"
+    
+    # Устанавливаем из python/
+    log_info "Установка SGLang из исходников..."
+    cd "$sgl_src/python"
+    $env_pip install -e ".[all]" || { log_error "Установка провалилась"; exit 1; }
+    cd -
+    
+    # FlashInfer (опционально)
+    $env_pip install flashinfer -U --find-links https://flashinfer.ai/whl/cu121/torch2.5/index.html || true
+    
+    # Полностью отключаем JIT — удаляем всю директорию с JIT-ядрами
+    JIT_DIR="${HOME}/miniconda3/envs/sglang_env/lib/python3.11/site-packages/sglang/jit_kernel"
+    if [ -d "$JIT_DIR" ]; then
+        rm -rf "$JIT_DIR"
+        log_info "JIT-ядра полностью удалены — SGLang будет использовать только PyTorch fallback"
+    else
+        log_warn "JIT-директория не найдена — уже отключена"
+    fi
+    
+    log_info "SGLang установлен с патчем и отключённым JIT — готово!"
 }
 
 create_lmdeploy_env() {
