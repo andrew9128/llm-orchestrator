@@ -1,85 +1,306 @@
 # LLM Infrastructure Bootstrap
 
-##  Оглавление
-1. [Быстрый старт](#быстрый-старт)
-2. [Архитектура](#архитектура)
-3. [Установка](#установка)
-4. [Использование](#использование)
-5. [Мониторинг](#мониторинг)
-6. [Troubleshooting](#troubleshooting)
-7. [API Reference](#api-reference)
+Скрипты для автоматической установки, настройки и запуска LLM-инфраструктуры на Linux без прав root. Поддерживает vLLM, SGLang, lmdeploy с автоматическим подбором параметров под железо.
 
-##  Быстрый старт
+---
 
-### Одной командой (рекомендуется)
+## Быстрый старт
+
 ```bash
-cd ~/llm_bootstrap
-./start_llm.sh --auto
+# Установить SGLang + vLLM и запустить автоматически
+./scripts/bootstrap_llm.sh --sglang --vllm
+ENGINE_TYPE=sglang ./start_llm.sh --auto
 ```
 
-**Что происходит:**
-1. Проверка зависимостей (jq, bc, curl)
-2. Установка Miniconda + vLLM/SGLang/lmdeploy
-3. Скачивание моделей (Vikhr-3-8B, Saiga-Nemo-12B)
-4. Автоматическое распределение по GPU
-5. Запуск healthcheck
+Скрипт сам определит GPU, подберёт модель, скачает её при необходимости и запустит сервер.
 
-**Время:** ~30-45 минут (зависит от интернета)
+**Время первого запуска:** 30–60 минут (зависит от скорости интернета, модели ~15GB).
 
-### Пошаговая установка
-```bash
-# 1. Установить только vLLM
-./scripts/bootstrap_llm.sh --vllm
+---
 
-# 2. Скачать конкретную модель
-./scripts/bootstrap_llm.sh --download-models "Vikhrmodels/QVikhr-3-8B-Instruction"
+## Архитектура
 
-# 3. Сгенерировать конфигурации
-source ~/.bashrc
-./scripts/configure_models.sh
-
-# 4. Запустить вручную
-llm-select-model vllm_QVikhr-3-8B-Instruction
 ```
-
-## ️ Архитектура
-
-### Структура проекта
-```
-llm_bootstrap/
+llm-orchestrator/
+├── start_llm.sh                  # Точка входа: меню или --auto
 ├── scripts/
-│   ├── bootstrap_llm.sh      # Установка движков
-│   ├── auto_deploy.sh        # Умное распределение по GPU
-│   └── configure_models.sh   # Генерация конфигов
+│   ├── bootstrap_llm.sh          # Установка движков в conda-окружения
+│   ├── auto_deploy.sh            # Анализ GPU, выбор модели, запуск
+│   └── configure_models.sh       # Генерация конфигов
 ├── healthchecks/
-│   ├── advanced_healthcheck.sh  # Мониторинг + автовосстановление
-│   └── healthcheck.sh           # Простой healthcheck
+│   ├── advanced_healthcheck.sh   # Мониторинг + автовосстановление
+│   └── healthcheck.sh            # Простой healthcheck
 ├── benchmarks/
-│   └── stress_test.py        # Нагрузочное тестирование
+│   └── stress_test.py
 └── docs/
-    ├── GPU_RECOMMENDATIONS.md  # Рекомендации по моделям
-    └── CHEATSHEET.txt          # Шпаргалка команд
+    ├── GPU_RECOMMENDATIONS.md
+    └── CHEATSHEET.txt
 ```
 
-### Компоненты
+Каждый движок устанавливается в отдельное conda-окружение (`vllm_env`, `sglang_env`, `lmdeploy_env`). Это позволяет иметь разные версии torch/CUDA на одной машине и переключаться между движками без конфликтов.
 
-**1. Bootstrap (`bootstrap_llm.sh`)**
-- Установка Miniconda без sudo
-- Создание conda окружений для каждого движка
-- Компиляция llama.cpp с CUDA
-- Скачивание моделей через HuggingFace CLI
+---
 
-**2. Auto-Deploy (`auto_deploy.sh`)**
-- Анализ доступных GPU (VRAM, загрузка)
-- Умный подбор модели под каждый GPU
-- Динамический расчет `max-model-len`, `gpu-memory-utilization`
-- Пропуск занятых GPU (>50% VRAM)
+## Установка
 
-**3. Healthcheck (`advanced_healthcheck.sh`)**
-- Мониторинг HTTP endpoints каждые 30с
-- Парсинг логов на OOM/context errors
-- Автоматический перезапуск с адаптацией параметров
-- Cooldown период (5 минут между перезапусками)
+### Требования
+
+- Linux x86_64 (проверено на Ubuntu 20.04)
+- NVIDIA GPU с поддержкой CUDA 12+
+- `nvidia-smi`, `curl`, `jq`, `bc` в системе
+- Без sudo: всё ставится в `~/miniconda3` и `~/.local`
+
+### Установка движков
+
+```bash
+# По одному
+./scripts/bootstrap_llm.sh --vllm
+./scripts/bootstrap_llm.sh --sglang
+./scripts/bootstrap_llm.sh --lmdeploy
+
+# Всё сразу
+./scripts/bootstrap_llm.sh --all
+```
+
+Что происходит при установке:
+
+1. Устанавливается Miniconda в `~/miniconda3` (если нет)
+2. Создаётся conda-окружение под каждый движок
+3. Для SGLang дополнительно устанавливается GCC 11 через conda-forge — он нужен для JIT-компиляции CUDA-ядер (системный GCC 9 на Ubuntu 20.04 не поддерживает C++20)
+4. Создаются launcher-скрипты в `~/.local/bin/`
+
+### Скачивание моделей
+
+Модели скачиваются автоматически при запуске `--auto` если их нет локально. Также вручную:
+
+```bash
+./scripts/bootstrap_llm.sh --download-models "Vikhrmodels/QVikhr-3-8B-Instruction"
+./scripts/bootstrap_llm.sh --download-models "IlyaGusev/saiga_nemo_12b"
+```
+
+Модели хранятся в `~/llm_models/`.
+
+---
+
+## Движки и бэкенды
+
+### SGLang 0.5.9
+
+**Окружение:** `sglang_env` — Python 3.11, Torch 2.9.1+cu128, CUDA 12.8
+
+| Компонент | Версия | Примечание |
+|-----------|--------|------------|
+| FlashInfer | 0.6.3 | JIT через tvm-ffi/ninja |
+| Triton | 3.5.1 | основной attention backend |
+| GCC (conda) | 11.4.0 | нужен для JIT C++20 ядер |
+| CUDA graph | отключён | GCC системный (9.x) не поддерживает C++20 при системной компиляции |
+| Attention backend | triton | задаётся флагом `--attention-backend triton` |
+| Sampling backend | pytorch | задаётся флагом `--sampling-backend pytorch` |
+
+**Параметры запуска:**
+```
+--mem-fraction-static 0.80
+--disable-cuda-graph
+--attention-backend triton
+--sampling-backend pytorch
+--tokenizer-mode auto
+--trust-remote-code
+```
+
+**Когда выбирается:** GPU категории 24gb при `ENGINE_TYPE=auto`.
+
+### vLLM 0.15.1
+
+**Окружение:** `vllm_env` — Python 3.11, Torch 2.9.1+cu128, CUDA 12.8
+
+| Компонент | Версия | Примечание |
+|-----------|--------|------------|
+| Flash Attention | нет | не установлен, vLLM использует встроенный FLASH_ATTN |
+| Attention backend | FLASH_ATTN (встроенный) | автовыбор из FLASH_ATTN / FLASHINFER / TRITON |
+| CUDA graph | отключён | `--enforce-eager` |
+| Chunked prefill | включён | |
+| Prefix caching | включён | |
+
+**Параметры запуска:**
+```
+--dtype auto
+--enforce-eager
+--enable-chunked-prefill
+--trust-remote-code
+--max-num-batched-tokens {ctx}
+--gpu-memory-utilization {util}
+--kv-cache-dtype {kv_dtype}
+```
+
+**Когда выбирается:** GPU категории 32gb, или когда SGLang недоступен, или при `ENGINE_TYPE=vllm`.
+
+### lmdeploy
+
+**Окружение:** `lmdeploy_env` — не установлен на текущей машине.
+
+**Параметры запуска:**
+```
+--backend pytorch
+--tp 1
+--session-len {ctx}
+--cache-max-entry-count {util}
+```
+
+**Когда выбирается:** multi-GPU конфигурации (TP > 1), или как fallback если vLLM и SGLang недоступны.
+
+---
+
+## Логика автовыбора
+
+### Классификация GPU по VRAM
+
+| Категория | VRAM | Пример GPU |
+|-----------|------|------------|
+| small | < 10GB | GTX 1080, RTX 3060 |
+| 12gb | 10–14GB | RTX 3080, RTX 4070 |
+| 16gb | 14–22GB | RTX A4000, RTX 4080 |
+| 24gb | 22–30GB | RTX A5000, RTX 3090 |
+| 32gb | ≥ 30GB | RTX A6000, A100 |
+
+### Выбор модели по категории
+
+| Категория | Приоритет моделей |
+|-----------|-------------------|
+| 12gb | QVikhr-3-4B-Instruction → saiga_mistral_7b |
+| 16gb | QVikhr-3-8B-Instruction → saiga_llama3_8b |
+| 24gb | saiga_nemo_12b → QVikhr-3-8B-Instruction |
+| 32gb | saiga_gemma3_27b → saiga_nemo_12b |
+
+### Выбор движка по категории (`ENGINE_TYPE=auto`)
+
+| Ситуация | Движок |
+|----------|--------|
+| Multi-GPU (TP > 1) | lmdeploy → vllm |
+| 32gb+ | vllm → sglang → lmdeploy |
+| 24gb | sglang → vllm → lmdeploy |
+| 16gb и меньше | vllm → sglang → lmdeploy |
+
+### Расчёт параметров запуска
+
+```
+weight_gb  = params_b × bytes_per_param + 0.5
+  fp16: bytes_per_param = 2.0
+  fp8:  bytes_per_param = 1.0
+  int4: bytes_per_param = 0.5
+
+overhead_gb = 1.2 (модели ≤ 9B) | 1.8 (модели > 9B)
+
+kv_budget  = free_gb - weight_gb - overhead_gb
+ctx        = f(kv_budget, params_b)  → округление до 4096/8192/16384/32768
+
+util = (free_gb - 1.5) / total_gb  → зажать в [0.50, 0.92]
+
+# SGLang получает +0.12 к util (mem_fraction_static считается иначе)
+# и зажимается в [0.80, 0.92]
+```
+
+---
+
+## Управление
+
+```bash
+# Запуск с автовыбором движка
+./start_llm.sh --auto
+
+# Запуск с конкретным движком
+ENGINE_TYPE=sglang ./start_llm.sh --auto
+ENGINE_TYPE=vllm   ./start_llm.sh --auto
+
+# Статус
+./scripts/auto_deploy.sh --status
+
+# Остановка
+./start_llm.sh --stop
+
+# Интерактивное меню
+./start_llm.sh
+```
+
+Логи движков пишутся в `~/llm_engines/{engine}_gpu{id}.log`.
+
+PID-файлы: `~/llm_engines/{engine}_gpu{id}.pid`.
+
+---
+
+## Мониторинг
+
+```bash
+# Логи SGLang на GPU 0
+tail -f ~/llm_engines/sglang_gpu0.log
+
+# Логи vLLM на GPU 0
+tail -f ~/llm_engines/vllm_gpu0.log
+
+# GPU в реальном времени
+watch -n 1 nvidia-smi
+
+# Healthcheck в фоне
+./start_llm.sh --healthcheck-start
+tail -f ~/llm_engines/healthcheck.log
+
+# Метрики vLLM
+curl http://localhost:8000/metrics
+```
+
+Healthcheck проверяет `/health` и `/v1/models` каждые 30 секунд и перезапускает упавшие процессы с cooldown 5 минут.
+
+---
+
+## API Reference
+
+Все движки поднимают OpenAI-совместимый API.
+
+```bash
+# Chat completions
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "QVikhr-3-8B-Instruction",
+    "messages": [{"role": "user", "content": "Привет!"}]
+  }'
+
+# Список моделей
+curl http://localhost:8000/v1/models
+
+# Healthcheck
+curl http://localhost:8000/health
+
+# Метрики (только vLLM)
+curl http://localhost:8000/metrics
+```
+
+### bootstrap_llm.sh
+
+```
+--vllm              Установить vLLM
+--sglang            Установить SGLang
+--lmdeploy          Установить lmdeploy
+--llamacpp          Установить llama.cpp
+--ollama            Установить Ollama
+--all               Всё сразу
+--download-models   Скачать модели (опционально список через пробел)
+```
+
+### auto_deploy.sh
+
+```
+deploy / --auto     Автоматическое развертывание
+--status            Статус всех моделей
+--stop              Остановить всё
+--help              Справка
+```
+
+Переменные окружения:
+
+```
+ENGINE_TYPE=auto|vllm|sglang|lmdeploy   (default: auto)
+AUTO_DEPLOY=true|false                   (default: false)
+```
 
 ##  Примеры вывода
 
@@ -130,135 +351,3 @@ GPU 1: saiga_nemo_12b (vllm) - порт 8001
 
 ═══════════════════════════════════════════════════════
 ```
-
-##  Troubleshooting
-
-### Модель не запускается (OOM)
-**Симптомы:**
-```
-[ERROR] CUDA out of memory
-```
-
-**Решение:**
-```bash
-# 1. Проверить сколько реально свободно
-nvidia-smi
-
-# 2. Убить чужие процессы
-kill -9 <PID>
-
-# 3. Перезапустить с меньшим context
-CUDA_VISIBLE_DEVICES=0 llm-manager start vllm \
-  --model ~/llm_models/QVikhr-3-8B \
-  --max-model-len 8192 \  # вместо 16384
-  --gpu-memory-utilization 0.75  # вместо 0.90
-```
-
-### Healthcheck не работает
-**Симптомы:**
-```
-[WARN] Файл состояния не найден: deploy_state.json
-```
-
-**Решение:**
-```bash
-# Проверить что модели запущены через auto_deploy
-./scripts/auto_deploy.sh --status
-
-# Если нет JSON файла
-ls -la ~/llm_engines/deploy_state.*
-
-# Пересоздать deployment
-./scripts/auto_deploy.sh --stop
-./scripts/auto_deploy.sh --auto
-```
-
-### Conda окружение не активируется
-**Решение:**
-```bash
-source ~/miniconda3/bin/activate
-conda init bash
-source ~/.bashrc
-```
-
-##  API Reference
-
-### bootstrap_llm.sh
-```bash
-./scripts/bootstrap_llm.sh [OPTIONS]
-
-OPTIONS:
-  --vllm              Установить vLLM
-  --sglang            Установить SGLang
-  --lmdeploy          Установить lmdeploy
-  --all               Все движки
-  --download-models   Скачать модели (опционально список)
-
-EXAMPLES:
-  # Только vLLM
-  ./scripts/bootstrap_llm.sh --vllm
-  
-  # Все + конкретная модель
-  ./scripts/bootstrap_llm.sh --all --download-models "Vikhrmodels/QVikhr-3-8B-Instruction"
-```
-
-### auto_deploy.sh
-```bash
-./scripts/auto_deploy.sh [COMMAND]
-
-COMMANDS:
-  deploy, --auto      Автоматическое развертывание
-  --status            Статус моделей
-  --stop              Остановить все
-  --plan              Показать план без запуска
-
-EXAMPLES:
-  # Автозапуск
-  ./scripts/auto_deploy.sh --auto
-  
-  # Проверка
-  ./scripts/auto_deploy.sh --status
-```
-
-##  Продвинутое использование
-
-### Ручной запуск с кастомными параметрами
-```bash
-# Nemo-12B на 2 GPU с tensor parallelism
-CUDA_VISIBLE_DEVICES=0,1 \
-source ~/miniconda3/bin/activate lmdeploy_env && \
-lmdeploy serve api_server ~/llm_models/saiga_nemo_12b \
-  --tp 2 \
-  --server-port 8002 \
-  --cache-max-entry-count 0.9
-```
-
-### Benchmark
-```bash
-cd ~/llm_bootstrap/benchmarks
-python stress_test.py
-```
-
-##  Метрики и мониторинг
-
-### GPU мониторинг
-```bash
-# Реалтайм
-watch -n 1 nvidia-smi
-
-# Логирование
-nvidia-smi dmon -s u -c 100 > gpu_usage.log
-```
-
-### API метрики
-```bash
-# vLLM metrics
-curl http://localhost:8000/metrics
-
-# Latency test
-time curl -X POST http://localhost:8000/v1/completions \
-  -d '{"model":"model","prompt":"test","max_tokens":10}'
-```
-```
-
----
