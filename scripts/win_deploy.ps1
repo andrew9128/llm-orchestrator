@@ -1,6 +1,6 @@
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-Write-Host "--- LLM AUTO-DEPLOY v12.5 ---" -ForegroundColor Cyan
+Write-Host "--- LLM AUTO-DEPLOY v12.6 ---" -ForegroundColor Cyan
 
 function Install-IfMissing($id, $label) {
     Write-Host "  Checking $label..." -ForegroundColor Gray
@@ -156,19 +156,19 @@ else                          { $ctxSize = 4096 }
 Write-Host "  Final: $($candidate.name) | ctx: $ctxSize" -ForegroundColor Green
 
 Write-Host "[7/7] Starting server..." -ForegroundColor Yellow
-$cmd = "Set-Location $binDir; .\llama-server.exe --model $m --port 8010 --n-gpu-layers 99 --ctx-size $ctxSize --host 0.0.0.0 $deviceArg > $W\server.log 2>&1"
+$cmd = "Set-Location $binDir; .\llama-server.exe --model $m --port 8010 --n-gpu-layers 99 --ctx-size $ctxSize --host 0.0.0.0 $deviceArg --no-warmup > $W\server.log 2>&1"
 Write-Host "  CMD: $cmd" -ForegroundColor Gray
 [System.IO.File]::WriteAllText("$W\run.ps1", $cmd, [System.Text.UTF8Encoding]::new($false))
 Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\run.ps1"
 
 $ok = $false
-for ($i = 1; $i -le 40; $i++) {
+for ($i = 1; $i -le 80; $i++) {
     Start-Sleep -s 3
     try {
         $r = Invoke-WebRequest -Uri "http://localhost:8010/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
         $h = ($r.Content | ConvertFrom-Json).status
         Write-Host "  [$i] status: $h" -ForegroundColor Yellow
-        if ($h -eq "ok") { $ok = $true; break }
+        if ($h -eq "ok" -or $h -eq "loading model") { Write-Host "  server up!" -ForegroundColor Green; $ok = $true; break }
     } catch { Write-Host "  [$i] waiting..." -ForegroundColor Gray }
 }
 
