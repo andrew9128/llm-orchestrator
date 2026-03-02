@@ -1,62 +1,67 @@
 $ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function DL($url, $out) {
-    Write-Host "Downloading: $(Split-Path $out -Leaf)"
+    Write-Host "Downloading: $(Split-Path $out -Leaf)..." -ForegroundColor Cyan
     $client = [System.Net.Http.HttpClient]::new()
-    $client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0")
     $client.Timeout = [System.TimeSpan]::FromHours(2)
-    $resp = $client.GetAsync($url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
-    $resp.EnsureSuccessStatusCode() | Out-Null
-    $src = $resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
-    $dst = [System.IO.File]::Create($out)
-    $src.CopyTo($dst)
-    $dst.Close(); $src.Close(); $client.Dispose()
-    if ((Get-Item $out).Length -lt 1MB) { throw "FAILED: $url" }
-    Write-Host "OK"
+    try {
+        $resp = $client.GetAsync($url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        $resp.EnsureSuccessStatusCode() | Out-Null
+        $src = $resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $dst = [System.IO.File]::Create($out)
+        $src.CopyTo($dst)
+        $dst.Close(); $src.Close()
+        if ((Get-Item $out).Length -lt 1MB) { throw "File too small" }
+        Write-Host "OK!" -ForegroundColor Green
+    } finally { $client.Dispose() }
 }
 
 $W = "$env:USERPROFILE\llm_native"
-New-Item -ItemType Directory -Path "$W\bin"    -Force | Out-Null
+New-Item -ItemType Directory -Path "$W\bin" -Force | Out-Null
 New-Item -ItemType Directory -Path "$W\models" -Force | Out-Null
 
 $gpu = Get-WmiObject Win32_VideoController | Where-Object { $_.Name -notmatch "Microsoft|Basic" } | Select-Object -First 1
-$gpuName = if ($gpu) { $gpu.Name } else { "CPU" }
-$ngl = 0; $tag = "b4594"
+$vram = if ($gpu) { [math]::Round($gpu.AdapterRAM / 1GB) } else { 0 }
+$tag = "b4594"
 
-if ($gpuName -match "NVIDIA") {
-    $ngl = 99
-    $drv = [int]($gpu.DriverVersion -replace '.*\.(\d+)$','$1')
-    $bin = if ($drv -ge 52500) { "llama-$tag-bin-win-cuda-cu12.4-x64.zip" } else { "llama-$tag-bin-win-cuda-cu11.7.1-x64.zip" }
-} elseif ($gpuName -match "AMD|Radeon") {
-    $ngl = 99; $bin = "llama-$tag-bin-win-vulkan-x64.zip"
-} elseif ($gpuName -match "Intel|Arc") {
-    $ngl = 99; $bin = "llama-$tag-bin-win-vulkan-x64.zip"
-} else {
-    $bin = "llama-$tag-bin-win-avx2-x64.zip"
+# Настройка под 8GB (RTX 5060)
+$ngl = 99
+$kv_type = "fp16"
+if ($vram -le 8) { 
+    $kv_type = "fp8_e5m2" # Сжимаем кэш, чтобы влезло 16к на 8ГБ карте
 }
 
-Write-Host "=== GPU: $gpuName | Package: $bin ==="
-
+# 1. Загрузка движка
 if (!(Test-Path "$W\bin\llama-server.exe")) {
+    $bin = "llama-$tag-bin-win-cuda-cu12.4-x64.zip"
     DL "https://github.com/ggerganov/llama.cpp/releases/download/$tag/$bin" "$W\llama.zip"
     Expand-Archive "$W\llama.zip" -DestinationPath "$W\bin" -Force
     Remove-Item "$W\llama.zip" -Force
-} else { Write-Host "Engine: exists, skip" }
+}
 
+# 2. Загрузка модели Saiga 8B
 $model = "$W\models\saiga.gguf"
-if (!(Test-Path $model) -or (Get-Item $model -ErrorAction SilentlyContinue).Length -lt 100MB) {
+if (!(Test-Path $model) -or (Get-Item $model).Length -lt 1GB) {
     DL "https://huggingface.co/IlyaGusev/saiga_llama3_8b_gguf/resolve/main/model-q4_k.gguf" $model
-} else { Write-Host "Model: exists, skip" }
+}
 
-"Set-Location '$W\bin'; .\llama-server.exe --model '$model' --port 8010 --n-gpu-layers $ngl --ctx-size 16384 --host 0.0.0.0 --log-disable" | Out-File "$W\start.ps1" -Encoding UTF8
+# 3. Создание старт-файла с оптимизацией под Blackwell/Ampere
+$cmd = "Set-Location '$W\bin'; .\llama-server.exe --model '$model' --port 8010 --n-gpu-layers $ngl --ctx-size 16384 --ctk-kv $kv_type --host 0.0.0.0 --log-disable"
+$cmd | Out-File "$W\start.ps1" -Encoding UTF8
 
-$a = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$W\start.ps1`""
-$t = New-ScheduledTaskTrigger -AtStartup
-$s = New-ScheduledTaskSettingsSet -Hidden -ExecutionTimeLimit 0
-Register-ScheduledTask -TaskName "LLM-Native-Server" -Action $a -Trigger $t -Settings $s -RunLevel Highest -Force | Out-Null
+# 4. Автозапуск через Task Scheduler (Silent)
+$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$W\start.ps1`""
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
+Register-ScheduledTask -TaskName "LLM-Server" -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
 
-Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$W\start.ps1`"" -WindowStyle Hidden
-Write-Host "=== DONE | API: http://localhost:8010/v1 ==="
+Write-Host "`n--- СТАТУС ---" -ForegroundColor Green
+Write-Host "GPU   : $($gpu.Name) (${vram}GB)"
+Write-Host "API   : http://localhost:8010/v1"
+Write-Host "KV    : $kv_type (Optimized for 16k)"
+Write-Host "DONE. Server will start hidden and on every boot."
+
+# Запуск прямо сейчас
+powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "$W\start.ps1"
