@@ -4,11 +4,17 @@ $ErrorActionPreference = 'Stop'
 
 function DL($url, $out) {
     Write-Host "Downloading: $(Split-Path $out -Leaf)"
-    $wc = New-Object System.Net.WebClient
-    $wc.Headers.Add("User-Agent", "Mozilla/5.0")
-    $wc.DownloadFile($url, $out)
-    if (!(Test-Path $out) -or (Get-Item $out).Length -lt 1MB) { throw "FAILED: $url" }
-    Write-Host "OK: $(Split-Path $out -Leaf)"
+    $client = [System.Net.Http.HttpClient]::new()
+    $client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0")
+    $client.Timeout = [System.TimeSpan]::FromHours(2)
+    $resp = $client.GetAsync($url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+    $resp.EnsureSuccessStatusCode() | Out-Null
+    $src = $resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+    $dst = [System.IO.File]::Create($out)
+    $src.CopyTo($dst)
+    $dst.Close(); $src.Close(); $client.Dispose()
+    if ((Get-Item $out).Length -lt 1MB) { throw "FAILED: $url" }
+    Write-Host "OK"
 }
 
 $W = "$env:USERPROFILE\llm_native"
@@ -17,8 +23,7 @@ New-Item -ItemType Directory -Path "$W\models" -Force | Out-Null
 
 $gpu = Get-WmiObject Win32_VideoController | Where-Object { $_.Name -notmatch "Microsoft|Basic" } | Select-Object -First 1
 $gpuName = if ($gpu) { $gpu.Name } else { "CPU" }
-$ngl = 0
-$tag = "b4594"
+$ngl = 0; $tag = "b4594"
 
 if ($gpuName -match "NVIDIA") {
     $ngl = 99
