@@ -3,6 +3,10 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
 
 function DL($url, $out) {
+    if ((Test-Path $out) -and (Get-Item $out).Length -gt 100MB) { 
+        Write-Host "File exists: $(Split-Path $out -Leaf)" -ForegroundColor Gray
+        return 
+    }
     Write-Host "Downloading: $(Split-Path $out -Leaf)..." -ForegroundColor Cyan
     $client = [System.Net.Http.HttpClient]::new()
     $client.Timeout = [System.TimeSpan]::FromHours(2)
@@ -13,7 +17,6 @@ function DL($url, $out) {
         $dst = [System.IO.File]::Create($out)
         $src.CopyTo($dst)
         $dst.Close(); $src.Close()
-        if ((Get-Item $out).Length -lt 1MB) { throw "File too small" }
         Write-Host "OK!" -ForegroundColor Green
     } finally { $client.Dispose() }
 }
@@ -29,11 +32,9 @@ $tag = "b4594"
 # Настройка под 8GB (RTX 5060)
 $ngl = 99
 $kv_type = "fp16"
-if ($vram -le 8) { 
-    $kv_type = "fp8_e5m2" # Сжимаем кэш, чтобы влезло 16к на 8ГБ карте
-}
+if ($vram -le 8) { $kv_type = "fp8_e5m2" }
 
-# 1. Загрузка движка
+# 1. Движок
 if (!(Test-Path "$W\bin\llama-server.exe")) {
     $bin = "llama-$tag-bin-win-cuda-cu12.4-x64.zip"
     DL "https://github.com/ggerganov/llama.cpp/releases/download/$tag/$bin" "$W\llama.zip"
@@ -41,17 +42,15 @@ if (!(Test-Path "$W\bin\llama-server.exe")) {
     Remove-Item "$W\llama.zip" -Force
 }
 
-# 2. Загрузка модели Saiga 8B
+# 2. Модель Saiga 8B
 $model = "$W\models\saiga.gguf"
-if (!(Test-Path $model) -or (Get-Item $model).Length -lt 1GB) {
-    DL "https://huggingface.co/IlyaGusev/saiga_llama3_8b_gguf/resolve/main/model-q4_k.gguf" $model
-}
+DL "https://huggingface.co/IlyaGusev/saiga_llama3_8b_gguf/resolve/main/model-q4_k.gguf" $model
 
-# 3. Создание старт-файла с оптимизацией под Blackwell/Ampere
-$cmd = "Set-Location '$W\bin'; .\llama-server.exe --model '$model' --port 8010 --n-gpu-layers $ngl --ctx-size 16384 --ctk-kv $kv_type --host 0.0.0.0 --log-disable"
+# 3. Старт-файл (флаг --cache-type-kv для новых версий)
+$cmd = "Set-Location '$W\bin'; .\llama-server.exe --model '$model' --port 8010 --n-gpu-layers $ngl --ctx-size 16384 --cache-type-kv $kv_type --host 0.0.0.0 --log-disable"
 $cmd | Out-File "$W\start.ps1" -Encoding UTF8
 
-# 4. Автозапуск через Task Scheduler (Silent)
+# 4. Автозапуск
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$W\start.ps1`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
@@ -60,8 +59,6 @@ Register-ScheduledTask -TaskName "LLM-Server" -Action $action -Trigger $trigger 
 Write-Host "`n--- СТАТУС ---" -ForegroundColor Green
 Write-Host "GPU   : $($gpu.Name) (${vram}GB)"
 Write-Host "API   : http://localhost:8010/v1"
-Write-Host "KV    : $kv_type (Optimized for 16k)"
-Write-Host "DONE. Server will start hidden and on every boot."
+Write-Host "DONE. Server is running hidden."
 
-# Запуск прямо сейчас
 powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "$W\start.ps1"
