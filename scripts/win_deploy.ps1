@@ -1,6 +1,6 @@
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-Write-Host "--- LLM AUTO-DEPLOY v12.7 ---" -ForegroundColor Cyan
+Write-Host "--- LLM AUTO-DEPLOY v12.8 ---" -ForegroundColor Cyan
 
 function Install-IfMissing($id, $label) {
     Write-Host "  Checking $label..." -ForegroundColor Gray
@@ -180,7 +180,9 @@ if ($ok) {
     curl.exe -L "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_watchdog.ps1" -o $wdScript --silent
     Write-Host "Starting watchdog in background..." -ForegroundColor Cyan
     Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-ExecutionPolicy", "Bypass", "-File", $wdScript
-    Write-Host "Watchdog started. To stop everything: run win_stop.ps1" -ForegroundColor Cyan
+    Write-Host "Watchdog started." -ForegroundColor Cyan
+    Write-Host "To stop everything run:" -ForegroundColor Cyan
+    Write-Host "  powershell -EP Bypass -c "curl.exe -L -o $env:TEMP\stop.ps1 https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_stop.ps1; & $env:TEMP\stop.ps1"" -ForegroundColor White
 } else {
     Write-Host "FAILED. Log:" -ForegroundColor Red
     if (Test-Path "$W\server.log") { Get-Content "$W\server.log" -Tail 30 }
