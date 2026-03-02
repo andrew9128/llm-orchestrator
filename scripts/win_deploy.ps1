@@ -1,27 +1,21 @@
-$ErrorActionPreference = 'SilentlyContinue'
-$ProgressPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop' # Теперь мы будем видеть ошибки
+$ProgressPreference = 'Continue' # Вернем прогресс-бар для наглядности
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-Write-Host "--- Smart LLM Orchestrator v7.2 (Blackwell Fix) ---" -ForegroundColor Cyan
+Write-Host "--- Smart LLM Orchestrator v7.3 (FORCE UPDATE) ---" -ForegroundColor Cyan
 
-# 1. ЗАЧИСТКА И ПАПКИ
-Stop-Process -Name "llama-server*" -Force -ErrorAction SilentlyContinue
+# 1. ПАПКИ
 $W = "$env:USERPROFILE\llm_native"
 if (!(Test-Path "$W\bin")) { New-Item -ItemType Directory -Path "$W\bin" -Force | Out-Null }
 if (!(Test-Path "$W\models")) { New-Item -ItemType Directory -Path "$W\models" -Force | Out-Null }
 
-# 2. УСТАНОВКА БИБЛИОТЕК MICROSOFT (ОБЯЗАТЕЛЬНО)
-if (!(Test-Path "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64")) {
-    Write-Host "Installing Microsoft C++ Redistributable..." -ForegroundColor Yellow
-    winget install -e --id Microsoft.VCRedist.2015+.x64 --accept-source-agreements --accept-package-agreements | Out-Null
-}
-
+# 2. ФУНКЦИЯ ЗАГРУЗКИ (с проверкой)
 function Download-Safe($url, $out, $minSize) {
     if ((Test-Path $out) -and ((Get-Item $out).Length -gt $minSize)) {
-        Write-Host "File OK: $(Split-Path $out -Leaf)" -ForegroundColor Gray
+        Write-Host "Found existing file: $(Split-Path $out -Leaf). Skipping download." -ForegroundColor Gray
         return
     }
-    Write-Host "Downloading $(Split-Path $out -Leaf)..." -ForegroundColor Yellow
+    Write-Host "Downloading $(Split-Path $out -Leaf)... This may take time." -ForegroundColor Yellow
     Import-Module BitsTransfer
     Start-BitsTransfer -Source $url -Destination $out -Priority High
 }
@@ -30,16 +24,15 @@ function Download-Safe($url, $out, $minSize) {
 $tag = "b4594"
 $bin_url = "https://github.com/ggerganov/llama.cpp/releases/download/$tag/llama-$tag-bin-win-cuda-cu12.4-x64.zip"
 Download-Safe $bin_url "$W\llama.zip" 10MB
+Write-Host "Unpacking engine..." -ForegroundColor Gray
 Expand-Archive -Path "$W\llama.zip" -DestinationPath "$W\bin" -Force
-Remove-Item "$W\llama.zip" -ErrorAction SilentlyContinue
 
 # 4. МОДЕЛЬ (Проверка на 5ГБ+)
 Download-Safe "https://huggingface.co/IlyaGusev/saiga_llama3_8b_gguf/resolve/main/model-q4_K.gguf" "$W\models\saiga.gguf" 4000MB
 
-# 5. ЗАПУСК НА GPU 1 (RTX 5060)
+# 5. КОМАНДА ЗАПУСКА (GPU 1 - RTX 5060)
 $ModelPath = "$W\models\saiga.gguf"
 $LogFile = "$W\server.log"
-
 $start_cmd = @"
 Set-Location '$W\bin'
 `$env:PATH = '$W\bin;' + `$env:PATH
@@ -48,13 +41,15 @@ Set-Location '$W\bin'
 "@
 $start_cmd | Out-File "$W\start.ps1" -Encoding ASCII -Force
 
-Write-Host "Starting server... (Wait 30s)" -ForegroundColor Green
+# 6. ЗАПУСК
+Write-Host "Starting server on GPU 1..." -ForegroundColor Green
+Stop-Process -Name "llama-server*" -Force -ErrorAction SilentlyContinue
 Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\start.ps1"
 
-Start-Sleep -Seconds 10
+Start-Sleep -Seconds 5
 if (Get-Process llama-server -ErrorAction SilentlyContinue) {
-    Write-Host "SUCCESS: Server is running on GPU 1!" -ForegroundColor Green
-    Write-Host "URL: http://localhost:8010/v1"
+    Write-Host "SUCCESS: API is live at http://localhost:8010/v1" -ForegroundColor Green
 } else {
-    Write-Host "ERROR: Server failed to start. Check log: cat $LogFile" -ForegroundColor Red
+    Write-Host "ERROR: Server died. Showing last log lines:" -ForegroundColor Red
+    if (Test-Path $LogFile) { Get-Content $LogFile -Tail 10 }
 }
