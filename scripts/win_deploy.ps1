@@ -1,7 +1,7 @@
-$ErrorActionPreference = 'Stop'
+k$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-Write-Host "--- LLM AUTO-DEPLOY v10.1 (RTX 5060 / Vulkan Fix) ---" -ForegroundColor Cyan
+Write-Host "--- LLM AUTO-DEPLOY v10.2 (RTX 5060 / Device Name Fix) ---" -ForegroundColor Cyan
 
 # 1. ЧИСТКА
 Stop-Process -Name "llama-server*" -Force -ErrorAction SilentlyContinue
@@ -33,10 +33,10 @@ if (!(Test-Path $m) -or (Get-Item $m).Length -lt 4GB) {
 # 5. ЗАПУСК
 # --device 0 = RTX 5060 (первая карта в списке Vulkan!)
 # --cache-type-kv УБРАН (не поддерживается в b4594)
-$run_cmd = "Set-Location '$W\bin'; .\llama-server.exe --model '$m' --port 8010 --n-gpu-layers 99 --ctx-size 16384 --host 0.0.0.0 --device 0 --log-disable > '$W\server.log' 2>&1"
+$run_cmd = "Set-Location '$W\bin'; .\llama-server.exe --model '$m' --port 8010 --n-gpu-layers 99 --ctx-size 16384 --host 0.0.0.0 --device NVIDIA0 --log-disable > '$W\server.log' 2>&1"
 $run_cmd | Out-File "$W\run.ps1" -Encoding UTF8 -Force
 
-Write-Host "[4/4] Starting Server on GPU 0 (RTX 5060)..." -ForegroundColor Green
+Write-Host "[4/4] Starting Server on GPU NVIDIA0 (RTX 5060)..." -ForegroundColor Green
 Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\run.ps1"
 Start-Sleep -s 10
 
