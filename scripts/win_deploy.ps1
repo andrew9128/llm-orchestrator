@@ -4,8 +4,9 @@ $ErrorActionPreference = 'Stop'
 
 function DL($url, $out) {
     Write-Host "Downloading: $(Split-Path $out -Leaf)"
-    Import-Module BitsTransfer
-    Start-BitsTransfer -Source $url -Destination $out -TransferType Download
+    $wc = New-Object System.Net.WebClient
+    $wc.Headers.Add("User-Agent", "Mozilla/5.0")
+    $wc.DownloadFile($url, $out)
     if (!(Test-Path $out) -or (Get-Item $out).Length -lt 1MB) { throw "FAILED: $url" }
     Write-Host "OK: $(Split-Path $out -Leaf)"
 }
