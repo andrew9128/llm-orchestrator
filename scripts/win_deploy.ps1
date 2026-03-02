@@ -1,38 +1,50 @@
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# ВЕРСИЯ 7.0 - Blackwell Dual-GPU Edition
+Write-Host "--- Smart LLM Orchestrator v7.0 ---" -ForegroundColor Cyan
+
+# 1. ПОЛНАЯ ОЧИСТКА ПРЕДЫДУЩИХ ПОПЫТОК
+Stop-Process -Name "llama-server*" -Force -ErrorAction SilentlyContinue
 $W = "$env:USERPROFILE\llm_native"
-$LogFile = "$W\server_final.log"
-
-# Заголовок для проверки версии
-Write-Host "--- Smart LLM Orchestrator v6.8 (ELITE FIX) ---" -ForegroundColor Cyan
-
-# 1. ЗАЧИСТКА ВСЕГО СТАРОГО
-Stop-Process -Name "llama-server*" -ErrorAction SilentlyContinue
 if (Test-Path "$W\bin") { Remove-Item -Recurse -Force "$W\bin" }
 New-Item -ItemType Directory -Path "$W\bin" -Force | Out-Null
+New-Item -ItemType Directory -Path "$W\models" -Force | Out-Null
 
-# 2. УСТАНОВКА VCRedist (Критично для работы .exe)
-Write-Host "Installing Microsoft C++ Runtime..." -ForegroundColor Yellow
-winget install -e --id Microsoft.VCRedist.2015+.x64 --accept-source-agreements --accept-package-agreements | Out-Null
+# 2. ФУНКЦИЯ ЗАГРУЗКИ ЧЕРЕЗ BITS (Самый надежный метод)
+function Download-File-Safe($url, $out) {
+    if ((Test-Path $out) -and (Get-Item $out).Length -gt 100MB) { return }
+    Write-Host "Downloading $(Split-Path $out -Leaf)..." -ForegroundColor Yellow
+    Import-Module BitsTransfer
+    Start-BitsTransfer -Source $url -Destination $out -Priority High
+}
 
-# 3. ВЫБОР ДВИЖКА (Vulkan для Blackwell - это гарантия запуска)
-# CUDA-бинарники часто бьются или не находят DLL. Vulkan встроен в драйвер 581.57.
-Write-Host "Downloading Llama.cpp (Vulkan Edition for Blackwell stability)..." -ForegroundColor Cyan
+# 3. СКАЧИВАЕМ ДВИЖОК (CUDA 12.4 для RTX 5060)
 $tag = "b4594"
-$url = "https://github.com/ggerganov/llama.cpp/releases/download/$tag/llama-$tag-bin-win-vulkan-x64.zip"
-curl.exe -L "$url" -o "$W\llama.zip"
+$bin_url = "https://github.com/ggerganov/llama.cpp/releases/download/$tag/llama-$tag-bin-win-cuda-cu12.4-x64.zip"
+Download-File-Safe $bin_url "$W\llama.zip"
 Expand-Archive -Path "$W\llama.zip" -DestinationPath "$W\bin" -Force
 Remove-Item "$W\llama.zip"
 
-# 4. ЗАПУСК
+# 4. СКАЧИВАЕМ МОДЕЛЬ
+Download-File-Safe "https://huggingface.co/IlyaGusev/saiga_llama3_8b_gguf/resolve/main/model-q4_K.gguf" "$W\models\saiga.gguf"
+
+# 5. ГЕНЕРАЦИЯ ФАЙЛА ЗАПУСКА СПЕЦИАЛЬНО ДЛЯ GPU 1 (RTX 5060)
+# Мы используем --device 1, чтобы сервер не пытался занять старую GTX 1080
 $ModelPath = "$W\models\saiga.gguf"
-$start_script = @"
+$LogFile = "$W\server.log"
+
+$start_cmd = @"
 Set-Location '$W\bin'
-# Для Vulkan используем --device
-.\llama-server.exe --model '$ModelPath' --port 8010 --n-gpu-layers 99 --ctx-size 16384 --cache-type-kv q4_0 --host 0.0.0.0 > '$LogFile' 2>&1
+# Устанавливаем путь к собственным DLL, чтобы не было 'молчаливых' вылетов
+`$env:PATH = '$W\bin;' + `$env:PATH
+# Принудительно выбираем вторую карту (RTX 5060)
+`$env:CUDA_VISIBLE_DEVICES = '1'
+.\llama-server.exe --model '$ModelPath' --port 8010 --n-gpu-layers 99 --ctx-size 16384 --cache-type-kv q4_0 --host 0.0.0.0 --log-disable > '$LogFile' 2>&1
 "@
-$start_script | Out-File "$W\start.ps1" -Encoding UTF8 -Force
+$start_cmd | Out-File "$W\start.ps1" -Encoding ASCII -Force
 
-Write-Host "Starting server on GPU 1 (RTX 5060)..." -ForegroundColor Green
+# 6. ЗАПУСК
+Write-Host "Starting server on GPU 1 (RTX 5060). Check http://localhost:8010/v1" -ForegroundColor Green
 Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\start.ps1"
-
-Write-Host "Wait 20s. If it fails again, run: cat $LogFile" -ForegroundColor Gray
