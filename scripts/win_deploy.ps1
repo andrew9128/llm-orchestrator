@@ -3,14 +3,11 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function DL($url, $out) {
-    Write-Host "Downloading: $([System.IO.Path]::GetFileName($out))"
-    for ($i=1; $i -le 3; $i++) {
-        & curl.exe -k --retry 3 --retry-delay 5 -fL $url -o $out
-        if ($LASTEXITCODE -eq 0 -and (Test-Path $out) -and (Get-Item $out).Length -gt 1MB) { return }
-        Write-Host "Retry $i..."
-        Start-Sleep 3
-    }
-    throw "FAILED: $url"
+    Write-Host "Downloading: $(Split-Path $out -Leaf)"
+    Import-Module BitsTransfer
+    Start-BitsTransfer -Source $url -Destination $out -TransferType Download
+    if (!(Test-Path $out) -or (Get-Item $out).Length -lt 1MB) { throw "FAILED: $url" }
+    Write-Host "OK: $(Split-Path $out -Leaf)"
 }
 
 $W = "$env:USERPROFILE\llm_native"
@@ -34,18 +31,18 @@ if ($gpuName -match "NVIDIA") {
     $bin = "llama-$tag-bin-win-avx2-x64.zip"
 }
 
-Write-Host "GPU: $gpuName | Package: $bin"
+Write-Host "=== GPU: $gpuName | Package: $bin ==="
 
 if (!(Test-Path "$W\bin\llama-server.exe")) {
     DL "https://github.com/ggerganov/llama.cpp/releases/download/$tag/$bin" "$W\llama.zip"
     Expand-Archive "$W\llama.zip" -DestinationPath "$W\bin" -Force
     Remove-Item "$W\llama.zip" -Force
-} else { Write-Host "Engine exists, skip" }
+} else { Write-Host "Engine: exists, skip" }
 
 $model = "$W\models\saiga.gguf"
 if (!(Test-Path $model) -or (Get-Item $model -ErrorAction SilentlyContinue).Length -lt 100MB) {
     DL "https://huggingface.co/IlyaGusev/saiga_llama3_8b_gguf/resolve/main/model-q4_k.gguf" $model
-} else { Write-Host "Model exists, skip" }
+} else { Write-Host "Model: exists, skip" }
 
 "Set-Location '$W\bin'; .\llama-server.exe --model '$model' --port 8010 --n-gpu-layers $ngl --ctx-size 16384 --host 0.0.0.0 --log-disable" | Out-File "$W\start.ps1" -Encoding UTF8
 
@@ -55,4 +52,4 @@ $s = New-ScheduledTaskSettingsSet -Hidden -ExecutionTimeLimit 0
 Register-ScheduledTask -TaskName "LLM-Native-Server" -Action $a -Trigger $t -Settings $s -RunLevel Highest -Force | Out-Null
 
 Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$W\start.ps1`"" -WindowStyle Hidden
-Write-Host "DONE | GPU: $gpuName | API: http://localhost:8010/v1"
+Write-Host "=== DONE | API: http://localhost:8010/v1 ==="
