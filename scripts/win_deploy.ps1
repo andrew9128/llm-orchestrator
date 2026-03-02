@@ -1,21 +1,25 @@
-$ProgressPreference = 'SilentlyContinue'
+$ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-Write-Host "--- LLM AUTO-DEPLOY v12.1 ---" -ForegroundColor Cyan
-Stop-Process -Name "llama-server*" -Force -ErrorAction SilentlyContinue
+Write-Host "--- LLM AUTO-DEPLOY v12.2 ---" -ForegroundColor Cyan
+
+# Kill old servers + release file locks
+Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -s 2
 $W = "$env:USERPROFILE\llm_native"
-if (Test-Path "$W\bin")        { Remove-Item -Recurse -Force "$W\bin" }
-if (Test-Path "$W\bin_vulkan") { Remove-Item -Recurse -Force "$W\bin_vulkan" }
+@("$W\bin","$W\bin_vulkan") | ForEach-Object {
+    if (Test-Path $_) { Remove-Item -Recurse -Force $_ -ErrorAction SilentlyContinue }
+}
 New-Item -ItemType Directory -Path "$W\bin"    -Force | Out-Null
 New-Item -ItemType Directory -Path "$W\models" -Force | Out-Null
 $tag = "b5248"
 
+# Models: minVram in MB
 $MODELS = @(
   [PSCustomObject]@{ name="qvikhr-1.7b";  file="qvikhr-1.7b.gguf";    minVram=2000; ctx=4096;  url="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruct-GGUF/resolve/main/qvikhr-3-1.7b-instruct-q4_k_m.gguf" }
   [PSCustomObject]@{ name="qvikhr-4b";    file="qvikhr-4b.gguf";      minVram=3500; ctx=8192;  url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruct-GGUF/resolve/main/qvikhr-3-4b-instruct-q4_k_m.gguf" }
   [PSCustomObject]@{ name="saiga-mis7b";  file="saiga-mistral7b.gguf"; minVram=5500; ctx=16384; url="https://huggingface.co/IlyaGusev/saiga_mistral_7b_gguf/resolve/main/model-q4_K.gguf" }
   [PSCustomObject]@{ name="saiga-8b";     file="saiga-llama3-8b.gguf"; minVram=5500; ctx=16384; url="https://huggingface.co/IlyaGusev/saiga_llama3_8b_gguf/resolve/main/model-q4_K.gguf" }
   [PSCustomObject]@{ name="qvikhr-8b";    file="qvikhr-8b.gguf";      minVram=5500; ctx=16384; url="https://huggingface.co/Vikhrmodels/QVikhr-3-8B-Instruct-GGUF/resolve/main/qvikhr-3-8b-instruct-q4_k_m.gguf" }
-  [PSCustomObject]@{ name="saiga-yagpt";  file="saiga-yandex-8b.gguf"; minVram=5500; ctx=16384; url="https://huggingface.co/IlyaGusev/saiga_yandexgpt_8b_gguf/resolve/main/model-q4_K.gguf" }
   [PSCustomObject]@{ name="saiga-gem12";  file="saiga-gemma3-12b.gguf";minVram=9000; ctx=32768; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/model-q4_K.gguf" }
   [PSCustomObject]@{ name="saiga-nem12";  file="saiga-nemo-12b.gguf";  minVram=9000; ctx=32768; url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/model-q4_K.gguf" }
 )
@@ -29,15 +33,15 @@ Expand-Archive "$W\engine.zip" "$W\bin" -Force
 Remove-Item "$W\engine.zip"
 $exePath = Get-ChildItem "$W\bin" -Recurse -Filter "llama-server.exe" | Select-Object -First 1 -ExpandProperty FullName
 $binDir = Split-Path $exePath -Parent
-Write-Host "  Copying all DLLs to exe dir..." -ForegroundColor Gray
 Get-ChildItem "$W\bin" -Recurse -Filter "*.dll" | ForEach-Object {
     if ($_.DirectoryName -ne $binDir) { Copy-Item $_.FullName $binDir -Force }
 }
-Write-Host "  DLLs: $((Get-ChildItem $binDir -Filter *.dll).Count)" -ForegroundColor Gray
+Write-Host "  DLLs in exe dir: $((Get-ChildItem $binDir -Filter *.dll).Count)" -ForegroundColor Gray
 $p = Start-Process $exePath "--version" -PassThru -Wait -NoNewWindow -RedirectStandardOutput "$W\vo.txt" -RedirectStandardError "$W\ve.txt"
 Write-Host "  CUDA exit: $($p.ExitCode)" -ForegroundColor Gray
 if ($p.ExitCode -ne 0) {
-    Write-Host "  CUDA failed, switching to Vulkan..." -ForegroundColor Yellow
+    Write-Host "  CUDA failed (missing runtime DLL), switching to Vulkan..." -ForegroundColor Yellow
+    Write-Host "  TIP: Install CUDA 12 toolkit from nvidia.com to enable CUDA support" -ForegroundColor Gray
     curl.exe -L "https://github.com/ggerganov/llama.cpp/releases/download/$tag/llama-$tag-bin-win-vulkan-x64.zip" -o "$W\vk.zip"
     Expand-Archive "$W\vk.zip" "$W\bin_vulkan" -Force
     Remove-Item "$W\vk.zip"
@@ -52,21 +56,28 @@ $devLines = @()
 if (Test-Path "$W\do.txt") { $devLines += Get-Content "$W\do.txt" }
 if (Test-Path "$W\de.txt") { $devLines += Get-Content "$W\de.txt" }
 $devLines | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
-$bestDevice = ""; $bestVram = 0
+
+# Выбираем GPU: сначала ищем RTX, потом просто наибольший VRAM
+$bestDevice = ""; $bestVram = 0; $bestIsRTX = $false
 foreach ($line in $devLines) {
-    if ($line -match "^\s*([A-Za-z]+\d+):\s*.+?\((\d+)\s*MiB") {
-        $dn = $Matches[1]; $vr = [int]$Matches[2]
-        if ($vr -gt $bestVram) { $bestVram = $vr; $bestDevice = $dn }
+    if ($line -match "^\s*([A-Za-z]+\d+):\s*(.+?)\((\d+)\s*MiB") {
+        $dn = $Matches[1]; $label = $Matches[2]; $vr = [int]$Matches[3]
+        $isRTX = $label -match "RTX"
+        # Предпочитаем RTX карты; среди равных - больший VRAM
+        if ((!$bestIsRTX -and $isRTX) -or ($isRTX -eq $bestIsRTX -and $vr -gt $bestVram)) {
+            $bestVram = $vr; $bestDevice = $dn; $bestIsRTX = $isRTX
+        }
     }
 }
-if (!$bestDevice) {
-    $line5060 = $devLines | Where-Object { $_ -match "5060" } | Select-Object -First 1
-    if ($line5060 -match "([A-Za-z]+\d+)\s*[=:]") { $bestDevice = $Matches[1] }
+if (!$bestDevice -and $devLines) {
+    $line5060 = $devLines | Where-Object { $_ -match "5060|RTX" } | Select-Object -First 1
+    if (!$line5060) { $line5060 = $devLines | Where-Object { $_ -match "[A-Za-z]+\d+:" } | Select-Object -First 1 }
+    if ($line5060 -match "([A-Za-z]+\d+)\s*:") { $bestDevice = $Matches[1] }
 }
-Write-Host "  Best: $bestDevice | VRAM: $bestVram MiB" -ForegroundColor Green
+Write-Host "  Selected: $bestDevice | VRAM: $bestVram MiB | RTX: $bestIsRTX" -ForegroundColor Green
 $deviceArg = if ($bestDevice) { "--device $bestDevice" } else { "" }
 
-Write-Host "[4/6] Selecting model for $bestVram MiB..." -ForegroundColor Yellow
+Write-Host "[4/6] Selecting model..." -ForegroundColor Yellow
 $availVram = $bestVram - 1200
 $candidate = $MODELS | Where-Object { $_.minVram -le $availVram } | Select-Object -Last 1
 if (!$candidate) { $candidate = $MODELS[0] }
@@ -78,13 +89,20 @@ else                          { $ctxSize = 4096 }
 Write-Host "  Model: $($candidate.name) | ctx: $ctxSize" -ForegroundColor Green
 
 $m = "$W\models\$($candidate.file)"
-Write-Host "[5/6] Model download..." -ForegroundColor Yellow
+Write-Host "[5/6] Checking model..." -ForegroundColor Yellow
 $needDl = (!(Test-Path $m)) -or ((Get-Item $m -ErrorAction SilentlyContinue).Length -lt 100MB)
 if ($needDl) {
+    Write-Host "  Downloading $($candidate.name)..." -ForegroundColor Yellow
     Import-Module BitsTransfer
-    try { Start-BitsTransfer -Source $candidate.url -Destination $m -Priority High }
-    catch { curl.exe -L $candidate.url -o $m --progress-bar }
-    Write-Host "  Downloaded: $([math]::Round((Get-Item $m).Length/1MB))MB" -ForegroundColor Green
+    try {
+        Start-BitsTransfer -Source $candidate.url -Destination $m -Priority High -ErrorAction Stop
+    } catch {
+        Write-Host "  BITS failed: $_ - trying curl..." -ForegroundColor Yellow
+        Remove-Item $m -ErrorAction SilentlyContinue
+        curl.exe -L $candidate.url -o $m
+    }
+    if (Test-Path $m) { Write-Host "  Downloaded: $([math]::Round((Get-Item $m).Length/1MB))MB" -ForegroundColor Green }
+    else { Write-Host "  ERROR: model file missing after download!" -ForegroundColor Red; exit 1 }
 } else {
     Write-Host "  Exists: $([math]::Round((Get-Item $m).Length/1MB))MB" -ForegroundColor Green
 }
@@ -95,21 +113,20 @@ Write-Host "  CMD: $cmd" -ForegroundColor Gray
 [System.IO.File]::WriteAllText("$W\run.ps1", $cmd, [System.Text.UTF8Encoding]::new($false))
 Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\run.ps1"
 
+Write-Host "  Waiting for /health ..." -ForegroundColor Yellow
 $ok = $false
-for ($i = 1; $i -le 30; $i++) {
-    Start-Sleep -s 2
+for ($i = 1; $i -le 40; $i++) {
+    Start-Sleep -s 3
     try {
         $r = Invoke-WebRequest -Uri "http://localhost:8010/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
-        if ($r.StatusCode -eq 200) {
-            $h = ($r.Content | ConvertFrom-Json).status
-            Write-Host "  [$i/30] $h" -ForegroundColor Yellow
-            if ($h -eq "ok") { $ok = $true; break }
-        }
-    } catch { Write-Host "  [$i/30] waiting..." -ForegroundColor Gray }
+        $h = ($r.Content | ConvertFrom-Json).status
+        Write-Host "  [$i] status: $h" -ForegroundColor Yellow
+        if ($h -eq "ok") { $ok = $true; break }
+    } catch { Write-Host "  [$i] waiting..." -ForegroundColor Gray }
 }
 
 if ($ok) {
-    Write-Host "SUCCESS! API: http://localhost:8010/v1 | Model: $($candidate.name) | GPU: $bestDevice ($bestVram MiB)" -ForegroundColor Green
+    Write-Host "SUCCESS! http://localhost:8010/v1 | $($candidate.name) | $bestDevice ($bestVram MiB)" -ForegroundColor Green
 } else {
     Write-Host "FAILED. Log:" -ForegroundColor Red
     if (Test-Path "$W\server.log") { Get-Content "$W\server.log" -Tail 30 }
