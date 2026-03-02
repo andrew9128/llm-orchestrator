@@ -1,6 +1,6 @@
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-Write-Host "--- LLM AUTO-DEPLOY v12.6 ---" -ForegroundColor Cyan
+Write-Host "--- LLM AUTO-DEPLOY v12.7 ---" -ForegroundColor Cyan
 
 function Install-IfMissing($id, $label) {
     Write-Host "  Checking $label..." -ForegroundColor Gray
@@ -161,19 +161,26 @@ Write-Host "  CMD: $cmd" -ForegroundColor Gray
 [System.IO.File]::WriteAllText("$W\run.ps1", $cmd, [System.Text.UTF8Encoding]::new($false))
 Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\run.ps1"
 
+# Wait for server to come up
+Write-Host "  Waiting for server..." -ForegroundColor Yellow
 $ok = $false
 for ($i = 1; $i -le 80; $i++) {
     Start-Sleep -s 3
     try {
-        $r = Invoke-WebRequest -Uri "http://localhost:8010/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+        $r = Invoke-WebRequest -Uri "http://localhost:8010/health" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
         $h = ($r.Content | ConvertFrom-Json).status
         Write-Host "  [$i] status: $h" -ForegroundColor Yellow
-        if ($h -eq "ok" -or $h -eq "loading model") { Write-Host "  server up!" -ForegroundColor Green; $ok = $true; break }
+        if ($h -eq "ok" -or $h -eq "loading model") { $ok = $true; break }
     } catch { Write-Host "  [$i] waiting..." -ForegroundColor Gray }
 }
 
 if ($ok) {
     Write-Host "SUCCESS! http://localhost:8010/v1 | $($candidate.name) | $bestDevice ($bestVram MiB)" -ForegroundColor Green
+    $wdScript = "$W\watchdog.ps1"
+    curl.exe -L "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_watchdog.ps1" -o $wdScript --silent
+    Write-Host "Starting watchdog in background..." -ForegroundColor Cyan
+    Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-ExecutionPolicy", "Bypass", "-File", $wdScript
+    Write-Host "Watchdog started. To stop everything: run win_stop.ps1" -ForegroundColor Cyan
 } else {
     Write-Host "FAILED. Log:" -ForegroundColor Red
     if (Test-Path "$W\server.log") { Get-Content "$W\server.log" -Tail 30 }
