@@ -1,46 +1,82 @@
-$ErrorActionPreference = 'Stop'
-# Отключаем прогресс-бар PowerShell, который вешает систему при больших загрузках
 $ProgressPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-Write-Host "!!! ПОЛНАЯ ЗАЧИСТКА И УСТАНОВКА LLAMA.CPP !!!" -ForegroundColor Red
-
-# 1. ОСТАНОВКА И УДАЛЕНИЕ СТАРОГО
-Stop-Process -Name "ollama*" -ErrorAction SilentlyContinue
-Stop-Process -Name "llama-server*" -ErrorAction SilentlyContinue
-
-$Paths = @("$env:USERPROFILE\.ollama", "$env:LOCALAPPDATA\Programs\Ollama")
-foreach ($path in $Paths) { if (Test-Path $path) { Remove-Item -Recurse -Force $path -ErrorAction SilentlyContinue } }
-
-# 2. ПОДГОТОВКА ПАПОК
 $WorkDir = "$env:USERPROFILE\llm_native"
-if (!(Test-Path "$WorkDir\bin")) { New-Item -ItemType Directory -Path "$WorkDir\bin" -Force }
-Set-Location $WorkDir
+New-Item -ItemType Directory -Path "$WorkDir\bin"    -Force | Out-Null
+New-Item -ItemType Directory -Path "$WorkDir\models" -Force | Out-Null
 
-# 3. СКАЧИВАЕМ ДВИЖЕК (если нет)
+# ── ДЕТЕКТ GPU ────────────────────────────────────────────────
+$gpu     = Get-WmiObject Win32_VideoController |
+           Where-Object { $_.Name -notmatch "Microsoft|Basic" } |
+           Select-Object -First 1
+$gpuName = if ($gpu) { $gpu.Name } else { "CPU" }
+
+# Версия драйвера → выбор CUDA 11 или 12
+$ngl = 0
+$tag = "b4594"
+if ($gpuName -match "NVIDIA") {
+    $ngl = 99
+    $drv = [int]($gpu.DriverVersion -replace '.*\.(\d+)$','$1')
+    if ($drv -ge 52500) {
+        $bin = "llama-$tag-bin-win-cuda-cu12.4-x64.zip"
+    } else {
+        $bin = "llama-$tag-bin-win-cuda-cu11.7.1-x64.zip"
+    }
+} elseif ($gpuName -match "AMD|Radeon|RX ") {
+    $ngl = 99
+    $bin = "llama-$tag-bin-win-vulkan-x64.zip"
+} elseif ($gpuName -match "Intel|Arc") {
+    $ngl = 99
+    $bin = "llama-$tag-bin-win-vulkan-x64.zip"
+} else {
+    $bin = "llama-$tag-bin-win-avx2-x64.zip"
+}
+
+# ── ДВИЖОК ───────────────────────────────────────────────────
 if (!(Test-Path "$WorkDir\bin\llama-server.exe")) {
-    Write-Host "[1/3] Скачивание движка llama.cpp (CUDA 12)..." -ForegroundColor Cyan
-    $ZipFile = "$WorkDir\llama_bin.zip"
-    $LlamaUrl = "https://github.com/ggerganov/llama.cpp/releases/download/b4594/llama-b4594-bin-win-cuda-cu12.4-x64.zip"
-    # Используем curl.exe для скорости и стабильности
-    curl.exe -L "$LlamaUrl" -o "$ZipFile"
-    Expand-Archive -Path $ZipFile -DestinationPath "$WorkDir\bin" -Force
-    Remove-Item $ZipFile
+    $url = "https://github.com/ggerganov/llama.cpp/releases/download/$tag/$bin"
+    & curl.exe -fsSL $url -o "$WorkDir\llama.zip"
+    Expand-Archive "$WorkDir\llama.zip" -DestinationPath "$WorkDir\bin" -Force
+    Remove-Item "$WorkDir\llama.zip" -Force
 }
 
-# 4. СКАЧИВАЕМ МОДЕЛЬ (САМЫЙ ВАЖНЫЙ ЭТАП)
-$ModelPath = "$WorkDir\saiga_llama3_8b.gguf"
-if (!(Test-Path $ModelPath)) {
-    Write-Host "[2/3] Скачивание Saiga Llama 3 8B (5.5GB). Пожалуйста, подождите..." -ForegroundColor Yellow
-    $ModelUrl = "https://huggingface.co/IlyaGusev/saiga_llama3_8b_gguf/resolve/main/model-q4_k.gguf"
-    # curl.exe покажет прогресс в консоли и не упадет по таймауту
-    curl.exe -L "$ModelUrl" -o "$ModelPath"
+# ── МОДЕЛЬ ────────────────────────────────────────────────────
+$model = "$WorkDir\models\saiga.gguf"
+if (!(Test-Path $model)) {
+    $murl = "https://huggingface.co/IlyaGusev/saiga_llama3_8b_gguf/resolve/main/model-q4_k.gguf"
+    & curl.exe -fL $murl -o $model
 }
 
-# 5. ЗАПУСК API
-Write-Host "[3/3] Запуск API сервера на порту 8010..." -ForegroundColor Green
-Write-Host "Для проверки в новом окне: curl http://localhost:8010/v1/models" -ForegroundColor Gray
+# ── СКРИПТ ЗАПУСКА ────────────────────────────────────────────
+$run = @"
+Set-Location '$WorkDir\bin'
+.\llama-server.exe ``
+    --model '$model' ``
+    --port 8010 ``
+    --n-gpu-layers $ngl ``
+    --ctx-size 16384 ``
+    --host 0.0.0.0 ``
+    --log-disable
+"@
+$run | Out-File "$WorkDir\start.ps1" -Encoding UTF8
 
-cd "$WorkDir\bin"
-# n-gpu-layers 99 выносит всё на твою RTX 5070
-.\llama-server.exe --model "$ModelPath" --port 8010 --n-gpu-layers 99 --ctx-size 16384 --host 0.0.0.0
+# ── АВТОЗАПУСК (Task Scheduler) ───────────────────────────────
+$action   = New-ScheduledTaskAction `
+    -Execute "powershell.exe" `
+    -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$WorkDir\start.ps1`""
+$trigger  = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -Hidden -ExecutionTimeLimit 0
+Register-ScheduledTask `
+    -TaskName "LLM-Native-Server" `
+    -Action $action -Trigger $trigger -Settings $settings `
+    -RunLevel Highest -Force | Out-Null
+
+# ── СТАРТ ПРЯМО СЕЙЧАС ────────────────────────────────────────
+Start-Process "powershell.exe" `
+    -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$WorkDir\start.ps1`"" `
+    -WindowStyle Hidden
+
+Write-Host "GPU   : $gpuName (layers=$ngl)"
+Write-Host "API   : http://localhost:8010/v1"
+Write-Host "DONE. Server runs silently. Auto-starts on reboot."
