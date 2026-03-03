@@ -1,4 +1,3 @@
-# LLM WIN DEPLOY v13.4
 # Usage:
 #   win_deploy.ps1                   -- deploy (default)
 #   win_deploy.ps1 --stop            -- stop server + watchdog
@@ -61,7 +60,7 @@ function Invoke-Status {
 }
 
 # =============================================================================
-# HELPERS (global scope - no nesting issues)
+# HELPERS
 # =============================================================================
 function Install-Pkg($id, $label) {
     Write-Host "  Checking $label..." -ForegroundColor Gray
@@ -131,7 +130,7 @@ function Select-BestModel($vramMb) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM AUTO-DEPLOY v13.4 (GPUs: $Gpus) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM AUTO-DEPLOY (GPUs: $Gpus) ---" -ForegroundColor Cyan
 
     Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -s 2

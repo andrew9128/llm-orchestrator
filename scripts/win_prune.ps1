@@ -62,7 +62,7 @@ if (Test-Path $W) {
                 Write-Host "  Removed: $p" -ForegroundColor Gray
             }
         }
-        # Удаляем файлы в корне (логи, скрипты)
+        # Удаляет файлы в корне (логи, скрипты)
         Get-ChildItem $W -File | ForEach-Object {
             Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
             Write-Host "  Removed file: $($_.Name)" -ForegroundColor Gray
