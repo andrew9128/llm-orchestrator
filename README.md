@@ -371,6 +371,12 @@ $f="$env:TEMP\s.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andre
 # Рестарт
 $f="$env:TEMP\s.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1"; powershell -ExecutionPolicy Bypass -File $f --restart
 
+# Удалить всё (включая модели)
+$f="$env:TEMP\p.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_prune.ps1"; powershell -ExecutionPolicy Bypass -File $f
+
+# Удалить всё кроме скачанных моделей
+$f="$env:TEMP\p.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_prune.ps1"; powershell -ExecutionPolicy Bypass -File $f -KeepModels
+
 # Запрос
 $f="$env:TEMP\ask.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_ask.ps1"; powershell -ExecutionPolicy Bypass -File $f "ЗАПРОС"
 
