@@ -489,17 +489,3 @@ powershell -EP Bypass -File $f -Gpus 1
 
 ---
 
-### API
-
-```powershell
-# List models
-curl http://localhost:8010/v1/models
-
-# Chat
-curl http://localhost:8010/v1/chat/completions `
-  -H "Content-Type: application/json" `
-  -d '{"model":"local","messages":[{"role":"user","content":"Привет!"}]}'
-
-# Health
-curl http://localhost:8010/health
-```
