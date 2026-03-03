@@ -351,3 +351,143 @@ GPU 1: saiga_nemo_12b (vllm) - порт 8001
 
 ═══════════════════════════════════════════════════════
 ```
+
+---
+
+## Windows — быстрый старт
+
+Все команды выполняются в **PowerShell от имени администратора**.
+
+```powershell
+# Запуск (установка + загрузка + старт)
+$f="$env:TEMP\s.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1"; powershell -ExecutionPolicy Bypass -File $f
+
+# Статус
+$f="$env:TEMP\s.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1"; powershell -ExecutionPolicy Bypass -File $f --status
+
+# Остановка
+$f="$env:TEMP\s.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1"; powershell -ExecutionPolicy Bypass -File $f --stop
+
+# Рестарт
+$f="$env:TEMP\s.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1"; powershell -ExecutionPolicy Bypass -File $f --restart
+```
+
+```powershell
+# Лучшая одна карта (default)
+powershell -EP Bypass -File $f
+
+# Использовать 2 карты
+powershell -EP Bypass -File $f -Gpus 2
+
+# Все карты
+powershell -EP Bypass -File $f -Gpus all
+
+# Конкретно одна
+powershell -EP Bypass -File $f -Gpus 1
+```
+---
+
+## Windows — логика работы
+
+### Что делает `win_deploy.ps1 --deploy`
+
+```
+[1/7] System dependencies
+      ├── VCRedist 2015+ (winget)
+      └── Python 3.12 (winget, если не установлен)
+
+[2/7] CUDA DLLs + pip
+      ├── nvidia-cuda-runtime-cu12  → cudart64_12.dll
+      ├── nvidia-cublas-cu12        → cublas64_12.dll, cublasLt64_12.dll
+      ├── nvidia-cuda-nvrtc-cu12    → nvrtc64_*.dll
+      └── huggingface-hub           → для скачивания моделей без LFS проблем
+
+[3/7] llama.cpp engine
+      ├── Скачивает CUDA 12.4 билд (~190MB)
+      └── Копирует все .dll рядом с llama-server.exe
+
+[4/7] Тест движка
+      ├── CUDA OK  → используем
+      └── CUDA fail → скачивает Vulkan билд (~25MB) как fallback
+
+[5/7] Определение GPU
+      ├── --list-devices парсит доступные устройства
+      ├── Предпочитает RTX > GTX
+      └── Среди равных — больший VRAM
+
+[6/7] Выбор модели и квантования (quality-first)
+      └── (см. таблицу ниже)
+
+[7/7] Запуск сервера
+      ├── Сохраняет команду в ~/llm_native/run.ps1
+      ├── Запускает llama-server в скрытом окне
+      ├── Поллит /health каждые 3 сек до 240 сек
+      └── Запускает watchdog в фоне
+```
+
+---
+
+### Выбор модели и квантования
+
+| VRAM | Модель | Quant | Контекст |
+|------|--------|-------|----------|
+| 32GB+ | saiga-nemo-12b | q8_0 | 32768 |
+| 22GB+ | saiga-nemo-12b | q8_0 | 24576 |
+| 14GB+ | saiga-nemo-12b | q6_K | 16384 |
+| 11GB+ | saiga-nemo-12b | q6_K | 8192 |
+| 9.5GB+ | qvikhr-8b / saiga-8b | q6_K | 16384 |
+| 8.5GB+ | saiga-mistral-7b | q6_K | 8192 |
+| 6.8GB+ | qvikhr-4b | q8_0 | 8192 |
+| 5.5GB+ | qvikhr-4b | q6_K | 8192 |
+| 4.5GB+ | qvikhr-4b | q5_K | 8192 |
+| 3.5GB+ | qvikhr-1.7b | q8_0 | 8192 |
+| 2.5GB+ | qvikhr-1.7b | q6_K | 4096 |
+| 1.8GB+ | qvikhr-1.7b | q4_K 2048 |
+
+---
+
+### Watchdog
+
+Запускается автоматически после деплоя. Работает в фоне бесконечно.
+
+```
+Каждые 10 сек     → проверяет /health
+2 падения подряд  → убивает и перезапускает сервер
+4+ падения        → уменьшает --ctx-size вдвое и перезапускает
+                    32768 → 16384 → 8192 → 4096 → 2048
+```
+
+Лог: `%USERPROFILE%\llm_native\watchdog.log`
+
+---
+
+### Файловая структура
+
+```
+%USERPROFILE%\llm_native\
+├── bin\            # CUDA движок (llama-server.exe + все DLL)
+├── bin_vulkan\     # Vulkan движок (fallback)
+├── cuda_dlls\      # CUDA DLL из pip
+├── models\         # .gguf модели (кешируются, повторно не качаются)
+├── run.ps1         # Команда запуска (перегенерируется при деплое)
+├── watchdog.ps1    # Watchdog (скачивается из репо)
+├── server.log      # Лог llama-server
+└── watchdog.log    # Лог watchdog
+```
+
+---
+
+### API
+
+```powershell
+# List models
+curl http://localhost:8010/v1/models
+
+# Chat
+curl http://localhost:8010/v1/chat/completions `
+  -H "Content-Type: application/json" `
+  -d '{"model":"local","messages":[{"role":"user","content":"Привет!"}]}'
+
+# Health
+curl http://localhost:8010/health
+```
