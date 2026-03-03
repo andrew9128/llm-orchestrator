@@ -454,7 +454,7 @@ powershell -EP Bypass -File $f -Gpus 1
 | 4.5GB+ | qvikhr-4b | q5_K | 8192 |
 | 3.5GB+ | qvikhr-1.7b | q8_0 | 8192 |
 | 2.5GB+ | qvikhr-1.7b | q6_K | 4096 |
-| 1.8GB+ | qvikhr-1.7b | q4_K 2048 |
+| 1.8GB+ | qvikhr-1.7b | q4_K | 2048 |
 
 ---
 
