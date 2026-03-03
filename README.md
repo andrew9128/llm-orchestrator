@@ -370,6 +370,12 @@ $f="$env:TEMP\s.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andre
 
 # Рестарт
 $f="$env:TEMP\s.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1"; powershell -ExecutionPolicy Bypass -File $f --restart
+
+# Запрос
+$f="$env:TEMP\ask.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_ask.ps1"; powershell -ExecutionPolicy Bypass -File $f "ЗАПРОС"
+
+# Чат
+$f="$env:TEMP\chat.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_chat.ps1"; powershell -ExecutionPolicy Bypass -File $f
 ```
 
 ```powershell
