@@ -131,18 +131,18 @@ restart_model() {
     local time_since_restart=$((now - last_restart))
     
     if [ $time_since_restart -lt $COOLDOWN_PERIOD ]; then
-        log "⏰ GPU $gpu_id: В cooldown периоде ($time_since_restart/$COOLDOWN_PERIOD сек)"
+        log " GPU $gpu_id: В cooldown периоде ($time_since_restart/$COOLDOWN_PERIOD сек)"
         return 1
     fi
     
     # Проверка максимума попыток
     local count=${RESTART_COUNT[$key]:-0}
     if [ $count -ge $MAX_RESTART_ATTEMPTS ]; then
-        log "🚫 GPU $gpu_id: Достигнут лимит перезапусков ($count/$MAX_RESTART_ATTEMPTS)"
+        log " GPU $gpu_id: Достигнут лимит перезапусков ($count/$MAX_RESTART_ATTEMPTS)"
         return 1
     fi
     
-    log "🔄 GPU $gpu_id: Попытка перезапуска #$attempt - $model ($engine)"
+    log " GPU $gpu_id: Попытка перезапуска #$attempt - $model ($engine)"
     
     # Останавливаем старый процесс
     local pid_file="${HOME}/llm_engines/${key}.pid"
@@ -157,7 +157,7 @@ restart_model() {
     local error_type=$(check_oom_in_logs "$log_file")
     
     if [ "$error_type" != "unknown" ]; then
-        log "📊 Обнаружена ошибка: $error_type"
+        log " Обнаружена ошибка: $error_type"
         
         # Адаптируем параметры
         deployment=$(adjust_parameters_on_error "$deployment" "$error_type")
@@ -229,7 +229,7 @@ restart_model() {
     LAST_RESTART_TIME[$key]=$now
     FAILURE_REASON[$key]=$error_type
     
-    log "✅ GPU $gpu_id: Перезапуск выполнен"
+    log "GPU $gpu_id: Перезапуск выполнен"
     return 0
 }
 
@@ -261,7 +261,7 @@ check_model() {
     
     # Проверка процесса
     if [ ! -f "$pid_file" ]; then
-        log "❌ GPU $gpu_id: PID файл не найден"
+        log "GPU $gpu_id: PID файл не найден"
         restart_model "$deployment"
         return
     fi
@@ -283,12 +283,12 @@ check_model() {
     fi
     
     if $health_ok; then
-        log "✅ GPU $gpu_id: $model OK (port $port)"
+        log "GPU $gpu_id: $model OK (port $port)"
         
         # Сбрасываем счетчик при успехе
         RESTART_COUNT[$key]=0
     else
-        log "⚠️  GPU $gpu_id: API не отвечает"
+        log "GPU $gpu_id: API не отвечает"
         
         # Проверяем логи на ошибки
         local log_file="${HOME}/llm_engines/${key}.log"
@@ -302,7 +302,7 @@ check_model() {
 }
 
 main_loop() {
-    log "🚀 Запуск Advanced Healthcheck"
+    log "Запуск Advanced Healthcheck"
     log "Интервал проверки: ${CHECK_INTERVAL}с"
     log "Макс. перезапусков: $MAX_RESTART_ATTEMPTS"
     log "Cooldown: ${COOLDOWN_PERIOD}с"
