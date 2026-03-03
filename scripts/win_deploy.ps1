@@ -1,4 +1,4 @@
-# LLM WIN DEPLOY v13.3
+# LLM WIN DEPLOY v13.4
 # Usage:
 #   win_deploy.ps1                   -- deploy (default)
 #   win_deploy.ps1 --stop            -- stop server + watchdog
@@ -98,23 +98,28 @@ function Select-BestModel($vramMb) {
     # q8_0 = excellent, q6_K = excellent, q5_K = good, q4_K = ok
     # minVram = model size + 1.8 GB (overhead + min KV cache)
     $catalog = @(
-        [PSCustomObject]@{ name="saiga-nem12-q8"; file="saiga-nem12-q8.gguf"; minVram=31800; quant="q8_0"; url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/model-q8_0.gguf" }
-        [PSCustomObject]@{ name="saiga-gem12-q8"; file="saiga-gem12-q8.gguf"; minVram=31800; quant="q8_0"; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/model-q8_0.gguf" }
-        [PSCustomObject]@{ name="saiga-nem12-q8"; file="saiga-nem12-q8.gguf"; minVram=22000; quant="q8_0"; url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/model-q8_0.gguf" }
-        [PSCustomObject]@{ name="saiga-gem12-q8"; file="saiga-gem12-q8.gguf"; minVram=22000; quant="q8_0"; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/model-q8_0.gguf" }
-        [PSCustomObject]@{ name="saiga-nem12-q6"; file="saiga-nem12-q6.gguf"; minVram=14000; quant="q6_K"; url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/model-q6_K.gguf" }
-        [PSCustomObject]@{ name="saiga-gem12-q6"; file="saiga-gem12-q6.gguf"; minVram=14000; quant="q6_K"; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/model-q6_K.gguf" }
-        [PSCustomObject]@{ name="saiga-nem12-q6"; file="saiga-nem12-q6.gguf"; minVram=11000; quant="q6_K"; url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/model-q6_K.gguf" }
-        [PSCustomObject]@{ name="saiga-gem12-q6"; file="saiga-gem12-q6.gguf"; minVram=11000; quant="q6_K"; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/model-q6_K.gguf" }
-        [PSCustomObject]@{ name="qvikhr-8b-q6";   file="qvikhr-8b-q6.gguf";  minVram=9500;  quant="q6_K"; url="https://huggingface.co/Vikhrmodels/QVikhr-3-8B-Instruct-GGUF/resolve/main/qvikhr-3-8b-instruct-q6_k.gguf" }
-        [PSCustomObject]@{ name="saiga-8b-q6";    file="saiga-8b-q6.gguf";   minVram=9500;  quant="q6_K"; url="https://huggingface.co/IlyaGusev/saiga_llama3_8b_gguf/resolve/main/model-q6_K.gguf" }
-        [PSCustomObject]@{ name="saiga-mis7b-q6"; file="saiga-mis7b-q6.gguf"; minVram=8500; quant="q6_K"; url="https://huggingface.co/IlyaGusev/saiga_mistral_7b_gguf/resolve/main/model-q6_K.gguf" }
+        [PSCustomObject]@{ name="saiga-nem12-q8"; file="saiga-nem12-q8.gguf"; minVram=31800; quant="q8_0"; url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q8_0.gguf" }
+        [PSCustomObject]@{ name="saiga-gem12-q8"; file="saiga-gem12-q8.gguf"; minVram=31800; quant="q8_0"; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q8_0.gguf" }
+        [PSCustomObject]@{ name="saiga-nem12-q8"; file="saiga-nem12-q8.gguf"; minVram=22000; quant="q8_0"; url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q8_0.gguf" }
+        [PSCustomObject]@{ name="saiga-gem12-q8"; file="saiga-gem12-q8.gguf"; minVram=22000; quant="q8_0"; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q8_0.gguf" }
+        [PSCustomObject]@{ name="saiga-nem12-q6"; file="saiga-nem12-q6.gguf"; minVram=13000; quant="q6_K"; url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q6_K.gguf" }
+        [PSCustomObject]@{ name="saiga-gem12-q6"; file="saiga-gem12-q6.gguf"; minVram=13000; quant="q6_K"; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q6_K.gguf" }
+        [PSCustomObject]@{ name="saiga-nem12-q5"; file="saiga-nem12-q5.gguf"; minVram=11000; quant="q5_K"; url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q5_K_M.gguf" }
+        [PSCustomObject]@{ name="saiga-gem12-q5"; file="saiga-gem12-q5.gguf"; minVram=11000; quant="q5_K"; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q5_K_M.gguf" }
+        [PSCustomObject]@{ name="saiga-nem12-q4"; file="saiga-nem12-q4.gguf"; minVram=10000; quant="q4_K"; url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q4_K_M.gguf" }
+        [PSCustomObject]@{ name="saiga-gem12-q4"; file="saiga-gem12-q4.gguf"; minVram=10000; quant="q4_K"; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q4_K_M.gguf" }
+        [PSCustomObject]@{ name="qvikhr-8b-q8";   file="qvikhr-8b-q8.gguf";  minVram=11000; quant="q8_0"; url="https://huggingface.co/Vikhrmodels/QVikhr-3-8B-Instruct-GGUF/resolve/main/qvikhr-3-8b-instruct-q8_0.gguf" }
+        [PSCustomObject]@{ name="saiga-8b-q8";    file="saiga-8b-q8.gguf";   minVram=11000; quant="q8_0"; url="https://huggingface.co/IlyaGusev/saiga_llama3_8b_gguf/resolve/main/saiga_llama3_8b.Q8_0.gguf" }
+        [PSCustomObject]@{ name="qvikhr-8b-q5";   file="qvikhr-8b-q5.gguf";  minVram=9000;  quant="q5_K"; url="https://huggingface.co/Vikhrmodels/QVikhr-3-8B-Instruct-GGUF/resolve/main/qvikhr-3-8b-instruct-q5_k_m.gguf" }
+        [PSCustomObject]@{ name="saiga-8b-q5";    file="saiga-8b-q5.gguf";   minVram=9000;  quant="q5_K"; url="https://huggingface.co/IlyaGusev/saiga_llama3_8b_gguf/resolve/main/saiga_llama3_8b.Q5_K_M.gguf" }
+        [PSCustomObject]@{ name="saiga-mis7b-q5"; file="saiga-mis7b-q5.gguf"; minVram=8000; quant="q5_K"; url="https://huggingface.co/IlyaGusev/saiga_mistral_7b_gguf/resolve/main/saiga_mistral_7b.Q5_K_M.gguf" }
         [PSCustomObject]@{ name="qvikhr-4b-q8";   file="qvikhr-4b-q8.gguf";  minVram=6800;  quant="q8_0"; url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruct-GGUF/resolve/main/qvikhr-3-4b-instruct-q8_0.gguf" }
-        [PSCustomObject]@{ name="qvikhr-4b-q6";   file="qvikhr-4b-q6.gguf";  minVram=5500;  quant="q6_K"; url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruct-GGUF/resolve/main/qvikhr-3-4b-instruct-q6_k.gguf" }
-        [PSCustomObject]@{ name="qvikhr-4b-q5";   file="qvikhr-4b-q5.gguf";  minVram=4500;  quant="q5_K"; url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruct-GGUF/resolve/main/qvikhr-3-4b-instruct-q5_k_m.gguf" }
-        [PSCustomObject]@{ name="qvikhr-1.7b-q8"; file="qvikhr-1.7b-q8.gguf"; minVram=3500; quant="q8_0"; url="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruct-GGUF/resolve/main/qvikhr-3-1.7b-instruct-q8_0.gguf" }
-        [PSCustomObject]@{ name="qvikhr-1.7b-q6"; file="qvikhr-1.7b-q6.gguf"; minVram=2500; quant="q6_K"; url="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruct-GGUF/resolve/main/qvikhr-3-1.7b-instruct-q6_k.gguf" }
-        [PSCustomObject]@{ name="qvikhr-1.7b-q4"; file="qvikhr-1.7b-q4.gguf"; minVram=1800; quant="q4_K"; url="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruct-GGUF/resolve/main/qvikhr-3-1.7b-instruct-q4_k_m.gguf" }
+        [PSCustomObject]@{ name="qvikhr-8b-q4";   file="qvikhr-8b-q4.gguf";  minVram=6500;  quant="q4_K"; url="https://huggingface.co/Vikhrmodels/QVikhr-3-8B-Instruct-GGUF/resolve/main/qvikhr-3-8b-instruct-q4_k_m.gguf" }
+        [PSCustomObject]@{ name="saiga-8b-q4";    file="saiga-8b-q4.gguf";   minVram=6500;  quant="q4_K"; url="https://huggingface.co/IlyaGusev/saiga_llama3_8b_gguf/resolve/main/saiga_llama3_8b.Q4_K_M.gguf" }
+        [PSCustomObject]@{ name="qvikhr-4b-q5";   file="qvikhr-4b-q5.gguf";  minVram=5000;  quant="q5_K"; url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruct-GGUF/resolve/main/qvikhr-3-4b-instruct-q5_k_m.gguf" }
+        [PSCustomObject]@{ name="qvikhr-4b-q4";   file="qvikhr-4b-q4.gguf";  minVram=4000;  quant="q4_K"; url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruct-GGUF/resolve/main/qvikhr-3-4b-instruct-q4_k_m.gguf" }
+        [PSCustomObject]@{ name="qvikhr-1.7b-q8"; file="qvikhr-1.7b-q8.gguf"; minVram=3200; quant="q8_0"; url="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruct-GGUF/resolve/main/qvikhr-3-1.7b-instruct-q8_0.gguf" }
+        [PSCustomObject]@{ name="qvikhr-1.7b-q4"; file="qvikhr-1.7b-q4.gguf"; minVram=2000; quant="q4_K"; url="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruct-GGUF/resolve/main/qvikhr-3-1.7b-instruct-q4_k_m.gguf" }
     )
     $budget = $vramMb - 1200
     $best = $catalog | Where-Object { $_.minVram -le $budget } | Select-Object -First 1
@@ -126,7 +131,7 @@ function Select-BestModel($vramMb) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM AUTO-DEPLOY v13.3 (GPUs: $Gpus) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM AUTO-DEPLOY v13.4 (GPUs: $Gpus) ---" -ForegroundColor Cyan
 
     Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -s 2
