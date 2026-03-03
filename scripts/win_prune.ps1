@@ -1,39 +1,63 @@
 $ErrorActionPreference = 'SilentlyContinue'
-Write-Host "--- LLM Orchestrator: TOTAL PRUNE ---" -ForegroundColor Red
+Write-Host "--- LLM ORCHESTRATOR: TOTAL SYSTEM WIPE ---" -ForegroundColor Red -BackgroundColor Black
 
-# 1. Остановка процессов
-Write-Host "[1/4] Stopping processes..." -ForegroundColor Yellow
-$killed = 0
-Get-Process | Where-Object { $_.Name -match "llama" } | ForEach-Object {
-    Stop-Process $_ -Force
-    $killed++
+# 1. СТОП ВСЕХ ПРОЦЕССОВ, ДЕРЖАЩИХ GPU (Самое важное для очистки памяти)
+Write-Host "[1/5] Force killing all processes using GPU..." -ForegroundColor Yellow
+$gpu_pids = nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>$null | ForEach-Object { $_.Trim() }
+
+foreach ($pid in $gpu_pids) {
+    if ($pid -match '^\d+$') {
+        Write-Host "  Terminating PID $pid..." -ForegroundColor Gray
+        Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+    }
 }
-# Убиваем watchdog
-Get-WmiObject Win32_Process | Where-Object {
-    $_.Name -eq "powershell.exe" -and $_.CommandLine -match "watchdog"
-} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 
-# 2. Удаление задач из планировщика
-Write-Host "[2/4] Removing scheduled tasks..." -ForegroundColor Yellow
-Unregister-ScheduledTask -TaskName "LLM-Native-Server" -Confirm:$false
-Unregister-ScheduledTask -TaskName "LLM-Server" -Confirm:$false
-Unregister-ScheduledTask -TaskName "LLM-Native-API" -Confirm:$false
+# 2. ДОПОЛНИТЕЛЬНАЯ ЗАЧИСТКА ПО ИМЕНАМ (на всякий случай)
+$TargetNames = @("llama-server", "python", "vllm", "sglang", "lmdeploy", "uvicorn", "api_server")
+foreach ($n in $TargetNames) {
+    Get-Process | Where-Object { $_.Name -match $n } | Stop-Process -Force -ErrorAction SilentlyContinue
+}
 
-# 3. Удаление всех файлов проекта
+# 3. ЧИСТКА ПЛАНИРОВЩИКА ЗАДАЧ
+Write-Host "[2/5] Removing all LLM scheduled tasks..." -ForegroundColor Yellow
+$Tasks = @("LLM-Native-Server", "LLM-Server", "LLM-Native-API", "LLM-Watchdog", "LLM-Server-Native")
+foreach ($t in $Tasks) {
+    Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction SilentlyContinue
+}
+
+# 4. УДАЛЕНИЕ ДИРЕКТОРИИ (llm_native)
 $W = "$env:USERPROFILE\llm_native"
 if (Test-Path $W) {
-    Write-Host "[3/4] Deleting project directory: $W (Models + DLLs + Logs)..." -ForegroundColor Yellow
-    # Снимаем атрибуты "только для чтения", если они есть
+    Write-Host "[3/5] Deleting entire directory: $W..." -ForegroundColor Red
+    # Даем драйверу 2 секунды "отпустить" память перед удалением бинарников
+    Start-Sleep -s 2
+    
+    # Снимаем защиту файлов (иногда блокируются как системные)
     Get-ChildItem -Path $W -Recurse | ForEach-Object { $_.Attributes = 'Normal' }
-    Remove-Item -Recurse -Force $W
+    
+    # Рекурсивное удаление
+    Remove-Item -Recurse -Force $W -ErrorAction SilentlyContinue
+    
+    if (Test-Path $W) {
+        Write-Host "  Standard delete failed, using CMD force wipe..." -ForegroundColor Gray
+        cmd.exe /c "rmdir /s /q `"$W`""
+    }
 }
 
-# 4. Очистка временных файлов загрузки
-Write-Host "[4/4] Cleaning temp files..." -ForegroundColor Yellow
-$TempFiles = @("s.ps1", "d.ps1", "x.ps1", "x75.ps1", "f.ps1", "ask.ps1", "chat.ps1")
-foreach ($f in $TempFiles) {
+# 5. ОЧИСТКА ВРЕМЕННЫХ СКРИПТОВ
+Write-Host "[4/5] Cleaning up temp downloaders..." -ForegroundColor Yellow
+$TempScripts = @("s.ps1", "d.ps1", "x.ps1", "f.ps1", "ask.ps1", "chat.ps1", "prune.ps1", "x75.ps1", "w.ps1")
+foreach ($f in $TempScripts) {
     if (Test-Path "$env:TEMP\$f") { Remove-Item -Force "$env:TEMP\$f" }
 }
 
-Write-Host "`n--- PRUNE COMPLETE ---" -ForegroundColor Green
-Write-Host "System is clean. Models and engines removed."
+# 6. ПРОВЕРКА DOCKER
+if (Get-Command docker -ErrorAction SilentlyContinue) {
+    Write-Host "[5/5] Stopping any LLM Docker containers..." -ForegroundColor Yellow
+    $docker_llm = docker ps -q --filter "name=vllm" --filter "name=sglang" --filter "name=worker-server"
+    if ($docker_llm) { docker stop $docker_llm | Out-Null }
+}
+
+Write-Host "`n--- SYSTEM WIPED CLEAN ---" -ForegroundColor Green
+Write-Host "All files removed. Memory should be free."
+Write-Host "Check 'nvidia-smi' to verify."
