@@ -1,4 +1,4 @@
-# LLM WIN DEPLOY
+# LLM WIN DEPLOY v14.1
 # On-demand model lifecycle: STOPPED -> LOADING -> READY -> IDLE -> STOPPED
 # All services (LLM, ASR, OCR, Embedding) start on request, unload on idle_timeout
 #
@@ -71,11 +71,11 @@ function Invoke-Status {
     Write-Host "--- LLM ORCHESTRATOR STATUS ---" -ForegroundColor Cyan
     $portMap = @{
         8010 = "LLM (llama-server)"
-        8051 = "ASR (GigaAM)"
-        8053 = "OCR (PaddleOCR)"
-        8054 = "Embedding (RoSBERTa)"
+        8011 = "ASR (GigaAM)"
+        8013 = "OCR (EasyOCR)"
+        8014 = "Embedding (RoSBERTa)"
     }
-    foreach ($port in 8010, 8051, 8053, 8054) {
+    foreach ($port in 8010, 8011, 8013, 8014) {
         $name = $portMap[$port]
         try {
             $r = Invoke-WebRequest -Uri "http://localhost:$port/health" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
@@ -108,6 +108,17 @@ function Invoke-Status {
             Write-Host "  Context:    $($Matches[1]) tokens" -ForegroundColor Cyan
         }
     }
+}
+
+# =============================================================================
+# STAMP HELPERS (idempotency — skip steps already done)
+# =============================================================================
+function Get-Stamp($name) {
+    $f = "$W\stamp_$name.txt"
+    if (Test-Path $f) { return (Get-Content $f -Raw).Trim() } else { return "" }
+}
+function Set-Stamp($name, $value) {
+    $value | Out-File "$W\stamp_$name.txt" -Encoding UTF8 -NoNewline
 }
 
 # =============================================================================
@@ -263,28 +274,27 @@ function Write-AsrService {
         "        if time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)",
         "threading.Thread(target=watcher, daemon=True).start()",
         "load_model()",
-        "HTTPServer(('0.0.0.0', 8051), H).serve_forever()"
+        "HTTPServer(('0.0.0.0', 8011), H).serve_forever()"
     )
     $lines -join "`n" | Out-File "$W\asr_service.py" -Encoding UTF8 -NoNewline
 }
 
 function Write-OcrService {
+    # Using easyocr - much more reliable on Windows than PaddleOCR
+    # Models downloaded on first run to ~/.EasyOCR/model/ (~200 MB)
     $lines = @(
-        "import sys, json, base64, tempfile, os, time, threading",
+        "import json, base64, tempfile, os, time, threading",
         "from http.server import HTTPServer, BaseHTTPRequestHandler",
-        "import paddle",
-        "# ФИКС: Отключаем экспериментальный движок PIR, который дает ошибку на 5080",
-        "paddle.set_flags({'FLAGS_enable_pir_api': 0})",
-        "os.environ['PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK'] = 'True'",
         "IDLE_TIMEOUT = $IDLE_OCR",
         "last_req = [time.time()]",
-        "ocr = [None]",
+        "reader = [None]",
         "def load_model():",
-        "    if ocr[0] is None:",
-        "        from paddleocr import PaddleOCR",
-        "        # ФИКС: Явно выключаем mkldnn и включаем gpu",
-        "        ocr[0] = PaddleOCR(use_textline_orientation=True, lang='ru', use_gpu=True, enable_mkldnn=False)", 
-        "    return ocr[0]",
+        "    if reader[0] is None:",
+        "        import easyocr",
+        "        # gpu=False: CPU inference, stable on all Windows setups",
+        "        # ru+en handles mixed documents",
+        "        reader[0] = easyocr.Reader(['ru', 'en'], gpu=False, verbose=False)",
+        "    return reader[0]",
         "class H(BaseHTTPRequestHandler):",
         "    def log_message(self, f, *a): pass",
         "    def do_GET(self):",
@@ -293,22 +303,19 @@ function Write-OcrService {
         "            self.wfile.write(json.dumps({'status':'ok'}).encode())",
         "    def do_POST(self):",
         "        last_req[0] = time.time()",
-        "        n = int(self.headers.get('Content-Length',0))",
+        "        n = int(self.headers.get('Content-Length', 0))",
         "        body = json.loads(self.rfile.read(n))",
-        "        img_data = body.get('image') or body.get('audio')",
-        "        if not img_data: ",
-        "             self.send_response(400); self.end_headers(); return",
-        "        img = base64.b64decode(img_data)",
+        "        img = base64.b64decode(body.get('image', ''))",
         "        ext = body.get('ext', '.png')",
         "        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:",
         "            f.write(img); tmp = f.name",
         "        try:",
-        "            r = load_model().ocr(tmp)", 
-        "            lines = [line[1][0] for page in r for line in page] if r else []",
-        "            text = '\n'.join(lines)",
-        "        except Exception as e: text = 'ERROR: ' + str(e)",
-        "        finally: ",
-        "            if os.path.exists(tmp): os.unlink(tmp)",
+        "            results = load_model().readtext(tmp, detail=0, paragraph=True)",
+        "            text = chr(10).join(results) if results else ''",
+        "        except Exception as e:",
+        "            text = 'ERROR: ' + str(e)",
+        "        finally:",
+        "            os.unlink(tmp)",
         "        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
         "        self.wfile.write(json.dumps({'text': text}).encode())",
         "def watcher():",
@@ -317,7 +324,7 @@ function Write-OcrService {
         "        if time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)",
         "threading.Thread(target=watcher, daemon=True).start()",
         "load_model()",
-        "HTTPServer(('0.0.0.0', 8053), H).serve_forever()"
+        "HTTPServer(('0.0.0.0', 8013), H).serve_forever()"
     )
     $lines -join "`n" | Out-File "$W\ocr_service.py" -Encoding UTF8 -NoNewline
 }
@@ -356,7 +363,7 @@ function Write-EmbedService {
         "        if time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)",
         "threading.Thread(target=watcher, daemon=True).start()",
         "load_model()",
-        "HTTPServer(('0.0.0.0', 8054), H).serve_forever()"
+        "HTTPServer(('0.0.0.0', 8014), H).serve_forever()"
     )
     $lines -join "`n" | Out-File "$W\embed_service.py" -Encoding UTF8 -NoNewline
 }
@@ -368,7 +375,6 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
     if ($packages) {
         $pkgList = $packages.Split(" ")
         & python -m pip install --quiet $pkgList 2>&1 | Out-Null
-        & python -m pip install --quiet "urllib3<2.0" "requests" 2>&1 | Out-Null
     }
     $errLog = $logPath -replace "\.log$", "_err.log"
     Start-Process "python" -ArgumentList $scriptPath -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errLog
@@ -388,7 +394,7 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM AUTO-DEPLOY V  (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM AUTO-DEPLOY v14.0 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
     Write-Host "    On-demand: all services start on request, auto-unload on idle" -ForegroundColor Gray
 
     Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -413,42 +419,72 @@ function Invoke-Deploy {
     }
     Write-Host "  Python: $(& python --version 2>&1)" -ForegroundColor Green
 
-    # [2] CUDA DLLs + hf-hub
+    # [2] CUDA DLLs + hf-hub  ── skip if stamp matches
     Write-Host "[2/7] CUDA DLLs + huggingface-hub..." -ForegroundColor Yellow
     $cudaDllDir = "$W\cuda_dlls"
-    New-Item -ItemType Directory -Path $cudaDllDir -Force | Out-Null
-    & python -m pip install --quiet --upgrade pip 2>&1 | Out-Null
-    & python -m pip install --quiet --target $cudaDllDir nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 nvidia-cuda-nvrtc-cu12 2>&1 | Out-Null
-    & python -m pip install --quiet huggingface-hub 2>&1 | Out-Null
-    $cudaDlls = Get-ChildItem $cudaDllDir -Recurse -Filter "*.dll"
-    Write-Host "  CUDA DLLs: $($cudaDlls.Count) | hf-hub: OK" -ForegroundColor Green
-
-    # [3] Engine
-    Write-Host "[3/7] Downloading CUDA 12.4 Engine ($tag)..." -ForegroundColor Yellow
-    curl.exe -L "https://github.com/ggerganov/llama.cpp/releases/download/$tag/llama-$tag-bin-win-cuda-cu12.4-x64.zip" -o "$W\engine.zip"
-    Expand-Archive "$W\engine.zip" "$W\bin" -Force
-    Remove-Item "$W\engine.zip"
-    $exePath = Get-ChildItem "$W\bin" -Recurse -Filter "llama-server.exe" | Select-Object -First 1 -ExpandProperty FullName
-    $binDir  = Split-Path $exePath -Parent
-    Get-ChildItem "$W\bin" -Recurse -Filter "*.dll" | ForEach-Object {
-        if ($_.DirectoryName -ne $binDir) { Copy-Item $_.FullName $binDir -Force }
+    if ((Get-Stamp "cuda_dlls") -eq "ok" -and (Test-Path $cudaDllDir) -and (Get-ChildItem $cudaDllDir -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue).Count -gt 0) {
+        $cudaDlls = Get-ChildItem $cudaDllDir -Recurse -Filter "*.dll"
+        Write-Host "  CUDA DLLs: cached ($($cudaDlls.Count) dlls) | hf-hub: cached" -ForegroundColor Green
+    } else {
+        New-Item -ItemType Directory -Path $cudaDllDir -Force | Out-Null
+        & python -m pip install --quiet --upgrade pip 2>&1 | Out-Null
+        & python -m pip install --quiet --target $cudaDllDir nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 nvidia-cuda-nvrtc-cu12 2>&1 | Out-Null
+        & python -m pip install --quiet huggingface-hub 2>&1 | Out-Null
+        $cudaDlls = Get-ChildItem $cudaDllDir -Recurse -Filter "*.dll"
+        Set-Stamp "cuda_dlls" "ok"
+        Write-Host "  CUDA DLLs: $($cudaDlls.Count) installed | hf-hub: OK" -ForegroundColor Green
     }
-    $cudaDlls | ForEach-Object { Copy-Item $_.FullName $binDir -Force }
-    Write-Host "  DLLs in bin: $((Get-ChildItem $binDir -Filter *.dll).Count)" -ForegroundColor Green
 
-    # [4] Test engine
-    Write-Host "[4/7] Testing engine..." -ForegroundColor Yellow
-    $p = Start-Process $exePath "--version" -PassThru -Wait -NoNewWindow -RedirectStandardOutput "$W\vo.txt" -RedirectStandardError "$W\ve.txt"
-    if ($p.ExitCode -ne 0) {
-        Write-Host "  CUDA failed - trying Vulkan fallback..." -ForegroundColor Yellow
-        curl.exe -L "https://github.com/ggerganov/llama.cpp/releases/download/$tag/llama-$tag-bin-win-vulkan-x64.zip" -o "$W\vk.zip"
-        Expand-Archive "$W\vk.zip" "$W\bin_vulkan" -Force
-        Remove-Item "$W\vk.zip"
-        $exePath = Get-ChildItem "$W\bin_vulkan" -Recurse -Filter "llama-server.exe" | Select-Object -First 1 -ExpandProperty FullName
+    # [3] Engine  ── skip if llama-server.exe already present for this tag
+    Write-Host "[3/7] Engine..." -ForegroundColor Yellow
+    $exePath = Get-ChildItem "$W\bin" -Recurse -Filter "llama-server.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+    if ((Get-Stamp "engine") -eq $tag -and $exePath -and (Test-Path $exePath)) {
+        $binDir = Split-Path $exePath -Parent
+        Write-Host "  Engine cached ($tag) at $binDir" -ForegroundColor Green
+    } else {
+        # Fresh install: wipe old bin, download, extract
+        @("$W\bin","$W\bin_vulkan") | ForEach-Object {
+            if (Test-Path $_) { Remove-Item -Recurse -Force $_ -ErrorAction SilentlyContinue }
+        }
+        New-Item -ItemType Directory -Path "$W\bin" -Force | Out-Null
+        Write-Host "  Downloading CUDA 12.4 engine ($tag)..." -ForegroundColor Yellow
+        curl.exe -L "https://github.com/ggerganov/llama.cpp/releases/download/$tag/llama-$tag-bin-win-cuda-cu12.4-x64.zip" -o "$W\engine.zip"
+        Expand-Archive "$W\engine.zip" "$W\bin" -Force
+        Remove-Item "$W\engine.zip"
+        $exePath = Get-ChildItem "$W\bin" -Recurse -Filter "llama-server.exe" | Select-Object -First 1 -ExpandProperty FullName
         $binDir  = Split-Path $exePath -Parent
-        Write-Host "  Using Vulkan" -ForegroundColor Yellow
-    } else { Write-Host "  CUDA OK" -ForegroundColor Green }
+        Get-ChildItem "$W\bin" -Recurse -Filter "*.dll" | ForEach-Object {
+            if ($_.DirectoryName -ne $binDir) { Copy-Item $_.FullName $binDir -Force }
+        }
+        $cudaDlls | ForEach-Object { Copy-Item $_.FullName $binDir -Force }
+        Set-Stamp "engine" $tag
+        Write-Host "  Engine installed. DLLs in bin: $((Get-ChildItem $binDir -Filter *.dll).Count)" -ForegroundColor Green
+    }
 
+    # [4] Test engine  ── skip test if stamp says cuda ok for this tag
+    Write-Host "[4/7] Testing engine..." -ForegroundColor Yellow
+    if ((Get-Stamp "engine_type") -eq "cuda_$tag") {
+        Write-Host "  Engine type: CUDA (cached check)" -ForegroundColor Green
+    } else {
+        $p = Start-Process $exePath "--version" -PassThru -Wait -NoNewWindow -RedirectStandardOutput "$W\vo.txt" -RedirectStandardError "$W\ve.txt"
+        if ($p.ExitCode -ne 0) {
+            Write-Host "  CUDA failed - trying Vulkan fallback..." -ForegroundColor Yellow
+            if ((Get-Stamp "engine_type") -eq "vulkan_$tag" -and (Test-Path "$W\bin_vulkan")) {
+                Write-Host "  Vulkan engine cached" -ForegroundColor Green
+            } else {
+                curl.exe -L "https://github.com/ggerganov/llama.cpp/releases/download/$tag/llama-$tag-bin-win-vulkan-x64.zip" -o "$W\vk.zip"
+                Expand-Archive "$W\vk.zip" "$W\bin_vulkan" -Force
+                Remove-Item "$W\vk.zip"
+            }
+            $exePath = Get-ChildItem "$W\bin_vulkan" -Recurse -Filter "llama-server.exe" | Select-Object -First 1 -ExpandProperty FullName
+            $binDir  = Split-Path $exePath -Parent
+            Set-Stamp "engine_type" "vulkan_$tag"
+            Write-Host "  Using Vulkan" -ForegroundColor Yellow
+        } else {
+            Set-Stamp "engine_type" "cuda_$tag"
+            Write-Host "  CUDA OK" -ForegroundColor Green
+        }
+    }
     # [5] GPU detection
     Write-Host "[5/7] Detecting GPUs (-Gpus $Gpus)..." -ForegroundColor Yellow
     Start-Process $exePath "--list-devices" -Wait -NoNewWindow -RedirectStandardOutput "$W\do.txt" -RedirectStandardError "$W\de.txt" -ErrorAction SilentlyContinue
@@ -542,7 +578,7 @@ function Invoke-Deploy {
     $cfgObj | ConvertTo-Json -Depth 5 | Out-File "$W\config.json" -Encoding UTF8 -NoNewline
 
     # Clear stale state files
-    foreach ($port in 8010, 8051, 8053, 8054) {
+    foreach ($port in 8010, 8011, 8013, 8014) {
         "STARTING" | Out-File "$W\state_$port.txt" -Encoding UTF8 -NoNewline
     }
 
@@ -570,22 +606,22 @@ function Invoke-Deploy {
     $launchEmbed = $Mode -in @("doc","full")
 
     if ($launchAsr) {
-        Write-Host "  [ASR] Starting GigaAM port 8051..." -ForegroundColor Yellow
+        Write-Host "  [ASR] Starting GigaAM port 8011..." -ForegroundColor Yellow
         Write-AsrService
-        Start-SpecialService "$W\asr_service.py" "$W\asr.log" 8051 "gigaam"
-        "READY" | Out-File "$W\state_8051.txt" -Encoding UTF8 -NoNewline
+        Start-SpecialService "$W\asr_service.py" "$W\asr.log" 8011 "gigaam"
+        "READY" | Out-File "$W\state_8011.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchOcr) {
-        Write-Host "  [OCR] Starting PaddleOCR port 8053..." -ForegroundColor Yellow
+        Write-Host "  [OCR] Starting EasyOCR port 8013..." -ForegroundColor Yellow
         Write-OcrService
-        Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8053 "paddlepaddle paddleocr"
-        "READY" | Out-File "$W\state_8053.txt" -Encoding UTF8 -NoNewline
+        Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013 "easyocr pillow"
+        "READY" | Out-File "$W\state_8013.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchEmbed) {
-        Write-Host "  [Embed] Starting RoSBERTa port 8054..." -ForegroundColor Yellow
+        Write-Host "  [Embed] Starting RoSBERTa port 8014..." -ForegroundColor Yellow
         Write-EmbedService
-        Start-SpecialService "$W\embed_service.py" "$W\embed.log" 8054 "sentence-transformers"
-        "READY" | Out-File "$W\state_8054.txt" -Encoding UTF8 -NoNewline
+        Start-SpecialService "$W\embed_service.py" "$W\embed.log" 8014 "sentence-transformers"
+        "READY" | Out-File "$W\state_8014.txt" -Encoding UTF8 -NoNewline
     }
 
     # Watchdog
@@ -601,9 +637,9 @@ function Invoke-Deploy {
     Write-Host "  Context: $ctxSize tokens"               -ForegroundColor Green
     Write-Host "  LLM:     http://localhost:8010/v1"      -ForegroundColor Green
     if ($Mode -eq "code") { Write-Host "  [code mode] Kodify-Nano-2B: optimised for code generation, completions, refactoring" -ForegroundColor Cyan }
-    if ($launchAsr)   { Write-Host "  ASR:     http://localhost:8051/v1/asr"        -ForegroundColor Cyan }
-    if ($launchOcr)   { Write-Host "  OCR:     http://localhost:8053/v1/ocr"        -ForegroundColor Cyan }
-    if ($launchEmbed) { Write-Host "  Embed:   http://localhost:8054/v1/embeddings" -ForegroundColor Cyan }
+    if ($launchAsr)   { Write-Host "  ASR:     http://localhost:8011/v1/asr"        -ForegroundColor Cyan }
+    if ($launchOcr)   { Write-Host "  OCR:     http://localhost:8013/v1/ocr  (EasyOCR ru+en)" -ForegroundColor Cyan }
+    if ($launchEmbed) { Write-Host "  Embed:   http://localhost:8014/v1/embeddings" -ForegroundColor Cyan }
     Write-Host ""
     Write-Host "  Idle timeouts: LLM=$($IDLE_LLM)s  ASR=$($IDLE_ASR)s  OCR=$($IDLE_OCR)s  Embed=$($IDLE_EMBED)s" -ForegroundColor Gray
     Write-Host "  Stop:    powershell -EP Bypass -File win_deploy.ps1 --stop"   -ForegroundColor Gray

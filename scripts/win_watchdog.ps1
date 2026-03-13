@@ -1,12 +1,13 @@
-# Monitors LLM + optional special services (ASR / OCR / Embedding)
-# Lifecycle: READY -> IDLE (timeout) -> STOPPED -> wake.trigger -> LOADING -> READY
-# On crash: auto-restart with ctx reduction fallback
+# LLM WATCHDOG v14.2
+# On-demand lifecycle for all services (LLM, ASR, OCR, Embedding)
+# Key fix: wake-proxy listens on STOPPED ports, catches requests, creates trigger
+# Flow: READY -> idle -> STOPPED -> wake-proxy on port -> trigger -> LOADING -> READY
 $ProgressPreference = "SilentlyContinue"
 $W = "$env:USERPROFILE\llm_native"
 $watchdogLog = "$W\watchdog.log"
 
 # =============================================================================
-# LOGGING
+# HELPERS
 # =============================================================================
 function Log($msg) {
     $ts = (Get-Date).ToString("HH:mm:ss")
@@ -15,25 +16,17 @@ function Log($msg) {
     Add-Content $watchdogLog $line -ErrorAction SilentlyContinue
 }
 
-# =============================================================================
-# HEALTH CHECK
-# =============================================================================
 function Test-Port($port) {
     try {
         $r = Invoke-WebRequest -Uri "http://localhost:$port/health" -UseBasicParsing -TimeoutSec 4 -ErrorAction Stop
-        $status = ($r.Content | ConvertFrom-Json).status
-        return $status
+        return ($r.Content | ConvertFrom-Json).status
     } catch { return "down" }
 }
 
-# =============================================================================
-# CTX MANAGEMENT
-# =============================================================================
 function Get-CurrentCtx {
-    $runFile = "$W\run.ps1"
-    if (Test-Path $runFile) {
-        $content = Get-Content $runFile -Raw
-        if ($content -match "--ctx-size (\d+)") { return [int]$Matches[1] }
+    if (Test-Path "$W\run.ps1") {
+        $c = Get-Content "$W\run.ps1" -Raw
+        if ($c -match "--ctx-size (\d+)") { return [int]$Matches[1] }
     }
     return 8192
 }
@@ -45,144 +38,217 @@ function Reduce-Ctx($current) {
 }
 
 function Update-CtxInRunScript($newCtx) {
-    $runFile = "$W\run.ps1"
-    if (Test-Path $runFile) {
-        $content = Get-Content $runFile -Raw
-        $content = $content -replace "--ctx-size \d+", "--ctx-size $newCtx"
-        [System.IO.File]::WriteAllText($runFile, $content, [System.Text.UTF8Encoding]::new($false))
+    if (Test-Path "$W\run.ps1") {
+        $c = Get-Content "$W\run.ps1" -Raw
+        $c = $c -replace "--ctx-size \d+", "--ctx-size $newCtx"
+        [System.IO.File]::WriteAllText("$W\run.ps1", $c, [System.Text.UTF8Encoding]::new($false))
     }
 }
 
-# =============================================================================
-# PROCESS MANAGEMENT
-# =============================================================================
+function Set-State($port, $stateVal) {
+    $stateVal | Out-File "$W\state_$port.txt" -Encoding UTF8 -NoNewline
+}
+
 function Start-LLMServer {
-    $runScript = "$W\run.ps1"
-    if (!(Test-Path $runScript)) { Log "run.ps1 not found, cannot start LLM"; return $false }
-    Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", $runScript
+    if (!(Test-Path "$W\run.ps1")) { Log "run.ps1 not found"; return $false }
+    Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\run.ps1"
     return $true
 }
 
 function Stop-LLMServer {
-    Get-Process | Where-Object { $_.Name -match "llama" } | ForEach-Object {
-        Stop-Process $_ -Force -ErrorAction SilentlyContinue
-    }
+    Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -s 3
-    Get-Process | Where-Object { $_.Name -match "llama" } | ForEach-Object {
-        Stop-Process $_ -Force -ErrorAction SilentlyContinue
-    }
+    Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
-function Start-SpecialService($scriptFile, $port) {
-    if (!(Test-Path $scriptFile)) { return $false }
-    $logFile = "$W\svc_$port.log"
-    $errFile = "$W\svc_${port}_err.log"
-    Start-Process "python" -ArgumentList $scriptFile -WindowStyle Hidden -RedirectStandardOutput $logFile -RedirectStandardError $errFile
-    for ($i = 1; $i -le 10; $i++) {
+function Start-SpecialSvc($scriptFile, $port) {
+    if (!(Test-Path $scriptFile)) { Log "[$port] Script not found: $scriptFile"; return $false }
+    $log = "$W\svc_$port.log"; $err = "$W\svc_${port}_err.log"
+    Start-Process "python" -ArgumentList $scriptFile -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err
+    for ($i = 1; $i -le 15; $i++) {
         Start-Sleep -s 2
-        $h = Test-Port $port
-        if ($h -eq "ok") { return $true }
+        if ((Test-Port $port) -eq "ok") { return $true }
     }
+    Log "[$port] Did not become healthy in 30s"
     return $false
 }
 
-function Stop-SpecialService($port) {
+function Stop-SpecialSvc($port) {
     Get-WmiObject Win32_Process | Where-Object {
-        $_.Name -match "python" -and $_.CommandLine -match "service.py"
-    } | ForEach-Object {
-        $cmdl = $_.CommandLine
-        if ($cmdl -match "asr_service|ocr_service|embed_service") {
-            $checkPort = 0
-            if ($cmdl -match "asr_service")  { $checkPort = 8051 }
-            if ($cmdl -match "ocr_service")  { $checkPort = 8053 }
-            if ($cmdl -match "embed_service"){ $checkPort = 8054 }
-            if ($checkPort -eq $port) {
-                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
+        $_.Name -match "python" -and $_.CommandLine -match "svc_service_$port|asr_service|ocr_service|embed_service"
+    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    # Also kill any wake-proxy on this port
+    Get-WmiObject Win32_Process | Where-Object {
+        $_.Name -match "python" -and $_.CommandLine -match "wake_proxy" -and $_.CommandLine -match "$port"
+    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
+# =============================================================================
+# WAKE PROXY
+# Starts a tiny Python HTTP server on $port while service is STOPPED.
+# Any incoming request → creates wake_PORT.trigger → returns 503
+# Proxy exits when real service comes up (port re-bound by real service)
+# =============================================================================
+function Write-WakeProxy($port, $svcName) {
+    $proxyScript = "$W\wake_proxy_$port.py"
+    $triggerFile = "$W\wake_$port.trigger"
+    # Use string formatting to embed values safely
+    $py = @"
+import socket, os, time, threading, sys
+
+PORT = $port
+TRIGGER = r'$triggerFile'
+W = r'$W'
+NAME = '$svcName'
+state_file = os.path.join(W, f'state_{PORT}.txt')
+
+def write_trigger():
+    with open(TRIGGER, 'w') as f:
+        f.write('wake')
+
+def check_real_service():
+    # Exit when real service takes over the port
+    time.sleep(5)
+    while True:
+        try:
+            import urllib.request
+            r = urllib.request.urlopen(f'http://127.0.0.1:{PORT}/health', timeout=2)
+            data = r.read().decode()
+            if 'ok' in data and 'wake_proxy' not in data:
+                sys.exit(0)
+        except Exception:
+            pass
+        time.sleep(3)
+
+# Start checker thread
+t = threading.Thread(target=check_real_service, daemon=True)
+t.start()
+
+# Simple raw socket server - no port conflict with real service
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    srv.bind(('0.0.0.0', PORT))
+except OSError:
+    sys.exit(0)  # Real service already on port
+
+srv.listen(5)
+srv.settimeout(120)
+
+triggered = False
+
+while True:
+    try:
+        conn, addr = srv.accept()
+        try:
+            data = conn.recv(4096).decode('utf-8', errors='ignore')
+            if '/health' in data and not triggered:
+                # Health check: return "starting"
+                body = '{\"status\":\"starting\",\"msg\":\"' + NAME + ' is waking up, retry in 30s\"}'
+            else:
+                # Any other request: trigger wake + 503
+                if not triggered:
+                    write_trigger()
+                    triggered = True
+                body = '{\"error\":\"service starting\",\"retry_after\":30}'
+            headers = f'HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n'
+            conn.sendall((headers + body).encode())
+        except Exception:
+            pass
+        finally:
+            conn.close()
+        
+        if triggered:
+            # Wrote trigger, give watchdog time to start real service, then exit
+            time.sleep(10)
+            srv.close()
+            sys.exit(0)
+    except socket.timeout:
+        # No requests for 2 min - exit, real service probably not needed
+        srv.close()
+        sys.exit(0)
+    except Exception:
+        sys.exit(0)
+"@
+    [System.IO.File]::WriteAllText($proxyScript, $py, [System.Text.UTF8Encoding]::new($false))
+    return $proxyScript
+}
+
+function Start-WakeProxy($port, $svcName) {
+    # Kill any existing proxy on this port
+    Get-WmiObject Win32_Process | Where-Object {
+        $_.Name -match "python" -and $_.CommandLine -match "wake_proxy_$port"
+    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -s 1
+
+    $proxyScript = Write-WakeProxy $port $svcName
+    $proxyLog = "$W\wake_proxy_$port.log"
+    Start-Process "python" -ArgumentList $proxyScript -WindowStyle Hidden -RedirectStandardOutput $proxyLog -RedirectStandardError "$proxyLog.err"
+    Start-Sleep -s 1
+    Log "[$port] Wake proxy started (will catch requests and wake service)"
+}
+
+function Stop-WakeProxy($port) {
+    Get-WmiObject Win32_Process | Where-Object {
+        $_.Name -match "python" -and $_.CommandLine -match "wake_proxy_$port"
+    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
 # =============================================================================
 # LOAD CONFIG
 # =============================================================================
 function Load-Config {
-    $cfgFile = "$W\config.json"
-    if (Test-Path $cfgFile) {
-        try { return Get-Content $cfgFile -Raw | ConvertFrom-Json }
-        catch {}
+    if (Test-Path "$W\config.json") {
+        try { return Get-Content "$W\config.json" -Raw | ConvertFrom-Json } catch {}
     }
-    # defaults
     return [PSCustomObject]@{
-        mode        = "chat"
-        idleLlm     = 600
-        idleAsr     = 300
-        idleOcr     = 300
-        idleEmbed   = 900
-        launchAsr   = $false
-        launchOcr   = $false
-        launchEmbed = $false
+        idleLlm=600; idleAsr=300; idleOcr=300; idleEmbed=900
+        launchAsr=$false; launchOcr=$false; launchEmbed=$false
     }
 }
 
 # =============================================================================
-# WRITE STATE FILE
+# MAIN
 # =============================================================================
-function Set-State($port, $state) {
-    $state | Out-File "$W\state_$port.txt" -Encoding UTF8 -NoNewline
-}
-
-# =============================================================================
-# MAIN LOOP
-# =============================================================================
-Log "Watchdog started. On-demand lifecycle enabled."
+Log "Watchdog v14.2 started."
 
 $cfg = Load-Config
-Log "Mode: $($cfg.mode) | LLM idle: $($cfg.idleLlm)s"
-
-# Per-service state tracking
-$svcPorts = @(8010)
-if ($cfg.launchAsr)   { $svcPorts += 8051 }
-if ($cfg.launchOcr)   { $svcPorts += 8053 }
-if ($cfg.launchEmbed) { $svcPorts += 8054 }
+Log "Idle timeouts: LLM=$($cfg.idleLlm)s ASR=$($cfg.idleAsr)s OCR=$($cfg.idleOcr)s Embed=$($cfg.idleEmbed)s"
 
 $scriptMap = @{
-    8051 = "$W\asr_service.py"
-    8053 = "$W\ocr_service.py"
-    8054 = "$W\embed_service.py"
+    8011 = "$W\asr_service.py"
+    8013 = "$W\ocr_service.py"
+    8014 = "$W\embed_service.py"
+}
+$nameMap = @{
+    8010 = "LLM"
+    8011 = "ASR"
+    8013 = "OCR"
+    8014 = "Embedding"
 }
 $idleMap = @{
     8010 = $cfg.idleLlm
-    8051 = $cfg.idleAsr
-    8053 = $cfg.idleOcr
-    8054 = $cfg.idleEmbed
+    8011 = $cfg.idleAsr
+    8013 = $cfg.idleOcr
+    8014 = $cfg.idleEmbed
 }
 
-# Track per-port state
-$state        = @{}   # "READY" | "STOPPED" | "LOADING"
-$failCount    = @{}   # consecutive health failures
-$wasRunning   = @{}   # was previously up
-$lastSeen     = @{}   # last time health returned ok (for idle detection)
-$serverLog    = "$W\server.log"
+$svcPorts = @(8010)
+if ($cfg.launchAsr)   { $svcPorts += 8011 }
+if ($cfg.launchOcr)   { $svcPorts += 8013 }
+if ($cfg.launchEmbed) { $svcPorts += 8014 }
+
+$state      = @{}
+$failCount  = @{}
+$wasUp      = @{}
+$lastSeen   = @{}
+$serverLog  = "$W\server.log"
 
 foreach ($port in $svcPorts) {
-    $state[$port]      = "READY"
-    $failCount[$port]  = 0
-    $wasRunning[$port] = $false
-    $lastSeen[$port]   = (Get-Date)
-
-    $logFile = "$W\svc_$port.log"
-    if ($port -eq 8010) { $logFile = "$W\server.log" }
-        if ((Test-Path $logFile) -and $state[$port] -eq "STOPPED") {
-            $lastWrite = (Get-Item $logFile).LastWriteTime
-            if (((Get-Date) - $lastWrite).TotalSeconds -lt 15) {
-                Log "[$port] Detected activity in logs - AUTO-WAKING"
-                "WAKING" | Out-File $logFile -Force 
-                # Создаем триггер для перезапуска
-                "" | Out-File "$W\wake_$port.trigger" -Force
-            }
-        }
-
+    $state[$port]     = "READY"
+    $failCount[$port] = 0
+    $wasUp[$port]     = $false
+    $lastSeen[$port]  = (Get-Date)
 }
 
 $loopCount = 0
@@ -191,149 +257,136 @@ while ($true) {
     Start-Sleep -s 10
     $loopCount++
 
-    # Reload config occasionally to pick up changes
+    # Reload config every 5 min
     if ($loopCount % 30 -eq 0) {
         $cfg = Load-Config
-        foreach ($port in $svcPorts) { $idleMap[$port] = $cfg.idleLlm }
+        $idleMap[8010] = $cfg.idleLlm
         $idleMap[8011] = $cfg.idleAsr
         $idleMap[8013] = $cfg.idleOcr
         $idleMap[8014] = $cfg.idleEmbed
     }
 
     foreach ($port in $svcPorts) {
-        $currentState = $state[$port]
-        $idle         = $idleMap[$port]
+        $cur   = $state[$port]
+        $idle  = $idleMap[$port]
+        $name  = $nameMap[$port]
 
-        # ---- STOPPED state: check wake trigger ----
-        if ($currentState -eq "STOPPED") {
-            $triggerFile = "$W\wake_$port.trigger"
-            if (Test-Path $triggerFile) {
-                Remove-Item $triggerFile -ErrorAction SilentlyContinue
-                Log "[$port] Wake trigger detected - restarting service"
-                $state[$port] = "LOADING"
+        # ── STOPPED: watch for wake trigger (created by wake proxy or manually) ──
+        if ($cur -eq "STOPPED") {
+            $trigger = "$W\wake_$port.trigger"
+            if (Test-Path $trigger) {
+                Remove-Item $trigger -ErrorAction SilentlyContinue
+                Log "[$port] Wake trigger → starting $name"
+
+                # Stop wake proxy first so it frees the port
+                Stop-WakeProxy $port
+                Start-Sleep -s 2
+
                 Set-State $port "LOADING"
+                $state[$port] = "LOADING"
+
                 if ($port -eq 8010) {
                     $ok = Start-LLMServer
-                    if (!$ok) { $state[$port] = "STOPPED"; continue }
                 } else {
-                    $scriptFile = $scriptMap[$port]
-                    $ok = Start-SpecialService $scriptFile $port
-                    if (!$ok) { Log "[$port] Failed to restart service"; continue }
+                    $ok = Start-SpecialSvc $scriptMap[$port] $port
                 }
-                $state[$port]      = "READY"
-                $failCount[$port]  = 0
-                $lastSeen[$port]   = (Get-Date)
-                $wasRunning[$port] = $false
-                Set-State $port "READY"
-                Log "[$port] Service restarted after wake trigger"
-            }
-            # Also check: if LLM is STOPPED but someone sent a request,
-            # server.log will show a recent write (attempt to connect)
-            if ($port -eq 8010 -and (Test-Path $serverLog)) {
-                $logAge = ((Get-Date) - (Get-Item $serverLog).LastWriteTime).TotalSeconds
-                if ($logAge -lt 15) {
-                    # Recent write could mean a connection attempt - auto-wake LLM
-                    $health = Test-Port 8010
-                    if ($health -eq "down") {
-                        Log "[8010] Recent server.log activity while STOPPED - auto-waking LLM"
-                        $state[8010] = "LOADING"
-                        Set-State 8010 "LOADING"
-                        $ok = Start-LLMServer
-                        if ($ok) {
-                            $state[8010]     = "READY"
-                            $failCount[8010] = 0
-                            $lastSeen[8010]  = (Get-Date)
-                            Set-State 8010 "READY"
-                            Log "[8010] LLM auto-woken from recent activity"
-                        }
-                    }
+
+                if ($ok) {
+                    $state[$port]    = "READY"
+                    $failCount[$port] = 0
+                    $lastSeen[$port] = (Get-Date)
+                    $wasUp[$port]    = $false
+                    Set-State $port "READY"
+                    Log "[$port] $name is READY"
+                } else {
+                    $state[$port] = "STOPPED"
+                    Set-State $port "STOPPED"
+                    Log "[$port] $name failed to start after wake trigger"
+                    Start-WakeProxy $port $name
                 }
             }
             continue
         }
 
-        # ---- LOADING state: wait for health ----
-        if ($currentState -eq "LOADING") {
+        # ── LOADING: wait for healthy ──
+        if ($cur -eq "LOADING") {
             $h = Test-Port $port
             if ($h -eq "ok" -or $h -eq "loading model") {
-                $state[$port]      = "READY"
-                $failCount[$port]  = 0
-                $lastSeen[$port]   = (Get-Date)
-                $wasRunning[$port] = $true
+                $state[$port]    = "READY"
+                $failCount[$port] = 0
+                $lastSeen[$port] = (Get-Date)
+                $wasUp[$port]    = $true
                 Set-State $port "READY"
-                Log "[$port] Service is now READY"
+                Log "[$port] $name READY"
             }
             continue
         }
 
-        # ---- READY state: health check + idle detection ----
+        # ── READY: health check + idle detection ──
         $h = Test-Port $port
 
         if ($h -eq "ok" -or $h -eq "loading model") {
-            if (!$wasRunning[$port]) { Log "[$port] Service UP (status: $h)" }
-            $wasRunning[$port] = $true
-            $failCount[$port]  = 0
-            $lastSeen[$port]   = (Get-Date)
+            if (!$wasUp[$port]) { Log "[$port] $name UP" }
+            $wasUp[$port]    = $true
+            $failCount[$port] = 0
+            $lastSeen[$port] = (Get-Date)
 
-            # Check idle: use server.log last-write for LLM (more accurate than health polls)
+            # Idle check for LLM: server.log last-write time is accurate
             if ($port -eq 8010 -and (Test-Path $serverLog)) {
-                $idleSeconds = ((Get-Date) - (Get-Item $serverLog).LastWriteTime).TotalSeconds
-                if ($idleSeconds -gt $idle) {
-                    Log "[8010] LLM idle for $([int]$idleSeconds)s (timeout=$idle s) - unloading"
+                $idleSec = ((Get-Date) - (Get-Item $serverLog).LastWriteTime).TotalSeconds
+                if ($idleSec -gt $idle) {
+                    Log "[8010] LLM idle $([int]$idleSec)s > $idle s → unloading"
                     Stop-LLMServer
-                    $state[8010] = "STOPPED"
+                    $state[8010]    = "STOPPED"
                     Set-State 8010 "STOPPED"
-                    Log "[8010] LLM STOPPED - VRAM released. Will restart on wake.trigger or activity."
+                    Log "[8010] LLM STOPPED. Starting wake proxy on port 8010..."
+                    Start-WakeProxy 8010 "LLM"
                 }
-            } elseif ($port -ne 8010) {
-                # Special services: idle tracked by their own Python watcher (os._exit(0))
-                # Watchdog detects death and marks STOPPED
+            }
+            # Idle for special services: they self-exit via os._exit(0),
+            # watchdog detects death in the next section
+            continue
+        }
+
+        # ── Health failed ──
+        $failCount[$port]++
+        Log "[$port] $name health=$h fail#$($failCount[$port])"
+
+        # Special services die on idle by design (os._exit) → mark STOPPED, start wake proxy
+        if ($port -ne 8010) {
+            if ($wasUp[$port] -or $failCount[$port] -ge 2) {
+                Log "[$port] $name stopped (idle or crash) → STOPPED"
+                $state[$port]    = "STOPPED"
+                $failCount[$port] = 0
+                $wasUp[$port]    = $false
+                Set-State $port "STOPPED"
+                Start-WakeProxy $port $name
             }
             continue
         }
 
-        # ---- Health failed ----
-        if ($state[$port] -eq "STOPPED") { continue }  # expected, skip
-
-        $failCount[$port]++
-        Log "[$port] health=$h fail #$($failCount[$port])"
-
+        # LLM crash recovery
         if ($failCount[$port] -ge 2) {
-            # Check if this is idle-expected death (special services kill themselves)
-            if ($port -ne 8010 -and $wasRunning[$port]) {
-                Log "[$port] Service stopped (idle self-exit or crash) - marking STOPPED"
-                $state[$port] = "STOPPED"
-                Set-State $port "STOPPED"
-                $failCount[$port] = 0
-                $wasRunning[$port] = $false
-                continue
+            Log "[8010] LLM crash → restarting"
+            Stop-LLMServer
+
+            if ($failCount[$port] -ge 4) {
+                $ctx = Get-CurrentCtx
+                if ($ctx -gt 2048) {
+                    $newCtx = Reduce-Ctx $ctx
+                    Log "[8010] Reducing ctx $ctx → $newCtx"
+                    Update-CtxInRunScript $newCtx
+                    $failCount[$port] = 0
+                }
             }
 
-            # LLM crash - restart
-            if ($port -eq 8010) {
-                Log "[8010] Restarting LLM..."
-                Stop-LLMServer
-
-                if ($failCount[$port] -ge 4) {
-                    $ctx = Get-CurrentCtx
-                    if ($ctx -gt 2048) {
-                        $newCtx = Reduce-Ctx $ctx
-                        Log "[8010] Reducing ctx: $ctx -> $newCtx"
-                        Update-CtxInRunScript $newCtx
-                        $failCount[$port] = 0
-                    } else {
-                        Log "[8010] ctx already at minimum (2048). Will still retry."
-                    }
-                }
-
-                $ok = Start-LLMServer
-                if ($ok) {
-                    $state[$port]      = "LOADING"
-                    $wasRunning[$port] = $false
-                    Set-State $port "LOADING"
-                    Log "[8010] Restart issued. Waiting for READY..."
-                    Start-Sleep -s 20
-                }
+            $ok = Start-LLMServer
+            if ($ok) {
+                $state[$port] = "LOADING"
+                $wasUp[$port] = $false
+                Set-State $port "LOADING"
+                Log "[8010] Restart issued, waiting..."
+                Start-Sleep -s 20
             }
         }
     }
