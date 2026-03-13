@@ -272,13 +272,14 @@ function Write-OcrService {
     $lines = @(
         "import sys, json, base64, tempfile, os, time, threading",
         "from http.server import HTTPServer, BaseHTTPRequestHandler",
+        "os.environ['PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK'] = 'True'",
         "IDLE_TIMEOUT = $IDLE_OCR",
         "last_req = [time.time()]",
         "ocr = [None]",
         "def load_model():",
         "    if ocr[0] is None:",
         "        from paddleocr import PaddleOCR",
-        "        ocr[0] = PaddleOCR(use_angle_cls=True, lang='ru', show_log=False)",
+        "        ocr[0] = PaddleOCR(use_textline_orientation=True, lang='ru')",
         "    return ocr[0]",
         "class H(BaseHTTPRequestHandler):",
         "    def log_message(self, f, *a): pass",
@@ -363,6 +364,7 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
     if ($packages) {
         $pkgList = $packages.Split(" ")
         & python -m pip install --quiet $pkgList 2>&1 | Out-Null
+        & python -m pip install --quiet "urllib3<2.0" "requests" 2>&1 | Out-Null
     }
     $errLog = $logPath -replace "\.log$", "_err.log"
     Start-Process "python" -ArgumentList $scriptPath -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errLog
