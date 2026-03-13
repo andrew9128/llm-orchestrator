@@ -170,6 +170,19 @@ foreach ($port in $svcPorts) {
     $failCount[$port]  = 0
     $wasRunning[$port] = $false
     $lastSeen[$port]   = (Get-Date)
+
+    $logFile = "$W\svc_$port.log"
+    if ($port -eq 8010) { $logFile = "$W\server.log" }
+        if ((Test-Path $logFile) -and $state[$port] -eq "STOPPED") {
+            $lastWrite = (Get-Item $logFile).LastWriteTime
+            if (((Get-Date) - $lastWrite).TotalSeconds -lt 15) {
+                Log "[$port] Detected activity in logs - AUTO-WAKING"
+                "WAKING" | Out-File $logFile -Force 
+                # Создаем триггер для перезапуска
+                "" | Out-File "$W\wake_$port.trigger" -Force
+            }
+        }
+
 }
 
 $loopCount = 0
