@@ -568,14 +568,14 @@ function Invoke-Deploy {
     if ($launchAsr) {
         Write-Host "  [ASR] Starting GigaAM port 8051..." -ForegroundColor Yellow
         Write-AsrService
-        Start-SpecialService "$W\asr_service.py" "$W\asr.log" 8011 "gigaam"
-        "READY" | Out-File "$W\state_8011.txt" -Encoding UTF8 -NoNewline
+        Start-SpecialService "$W\asr_service.py" "$W\asr.log" 8051 "gigaam"
+        "READY" | Out-File "$W\state_8051.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchOcr) {
         Write-Host "  [OCR] Starting PaddleOCR port 8053..." -ForegroundColor Yellow
         Write-OcrService
-        Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013 "paddlepaddle paddleocr"
-        "READY" | Out-File "$W\state_8013.txt" -Encoding UTF8 -NoNewline
+        Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8053 "paddlepaddle paddleocr"
+        "READY" | Out-File "$W\state_8053.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchEmbed) {
         Write-Host "  [Embed] Starting RoSBERTa port 8054..." -ForegroundColor Yellow
