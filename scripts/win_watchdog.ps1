@@ -1,4 +1,3 @@
-# LLM WATCHDOG v14.1
 # Monitors LLM + optional special services (ASR / OCR / Embedding)
 # Lifecycle: READY -> IDLE (timeout) -> STOPPED -> wake.trigger -> LOADING -> READY
 # On crash: auto-restart with ctx reduction fallback
@@ -136,7 +135,7 @@ function Set-State($port, $state) {
 # =============================================================================
 # MAIN LOOP
 # =============================================================================
-Log "Watchdog v14.0 started. On-demand lifecycle enabled."
+Log "Watchdog started. On-demand lifecycle enabled."
 
 $cfg = Load-Config
 Log "Mode: $($cfg.mode) | LLM idle: $($cfg.idleLlm)s"
