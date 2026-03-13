@@ -93,9 +93,9 @@ function Stop-SpecialService($port) {
         $cmdl = $_.CommandLine
         if ($cmdl -match "asr_service|ocr_service|embed_service") {
             $checkPort = 0
-            if ($cmdl -match "asr_service")  { $checkPort = 8011 }
-            if ($cmdl -match "ocr_service")  { $checkPort = 8013 }
-            if ($cmdl -match "embed_service"){ $checkPort = 8014 }
+            if ($cmdl -match "asr_service")  { $checkPort = 8051 }
+            if ($cmdl -match "ocr_service")  { $checkPort = 8053 }
+            if ($cmdl -match "embed_service"){ $checkPort = 8054 }
             if ($checkPort -eq $port) {
                 Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
             }
@@ -142,20 +142,20 @@ Log "Mode: $($cfg.mode) | LLM idle: $($cfg.idleLlm)s"
 
 # Per-service state tracking
 $svcPorts = @(8010)
-if ($cfg.launchAsr)   { $svcPorts += 8011 }
-if ($cfg.launchOcr)   { $svcPorts += 8013 }
-if ($cfg.launchEmbed) { $svcPorts += 8014 }
+if ($cfg.launchAsr)   { $svcPorts += 8051 }
+if ($cfg.launchOcr)   { $svcPorts += 8053 }
+if ($cfg.launchEmbed) { $svcPorts += 8054 }
 
 $scriptMap = @{
-    8011 = "$W\asr_service.py"
-    8013 = "$W\ocr_service.py"
-    8014 = "$W\embed_service.py"
+    8051 = "$W\asr_service.py"
+    8053 = "$W\ocr_service.py"
+    8054 = "$W\embed_service.py"
 }
 $idleMap = @{
     8010 = $cfg.idleLlm
-    8011 = $cfg.idleAsr
-    8013 = $cfg.idleOcr
-    8014 = $cfg.idleEmbed
+    8051 = $cfg.idleAsr
+    8053 = $cfg.idleOcr
+    8054 = $cfg.idleEmbed
 }
 
 # Track per-port state

@@ -71,11 +71,11 @@ function Invoke-Status {
     Write-Host "--- LLM ORCHESTRATOR STATUS ---" -ForegroundColor Cyan
     $portMap = @{
         8010 = "LLM (llama-server)"
-        8011 = "ASR (GigaAM)"
-        8013 = "OCR (PaddleOCR)"
-        8014 = "Embedding (RoSBERTa)"
+        8051 = "ASR (GigaAM)"
+        8053 = "OCR (PaddleOCR)"
+        8054 = "Embedding (RoSBERTa)"
     }
-    foreach ($port in 8010, 8011, 8013, 8014) {
+    foreach ($port in 8010, 8051, 8053, 8054) {
         $name = $portMap[$port]
         try {
             $r = Invoke-WebRequest -Uri "http://localhost:$port/health" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
@@ -263,7 +263,7 @@ function Write-AsrService {
         "        if time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)",
         "threading.Thread(target=watcher, daemon=True).start()",
         "load_model()",
-        "HTTPServer(('0.0.0.0', 8011), H).serve_forever()"
+        "HTTPServer(('0.0.0.0', 8051), H).serve_forever()"
     )
     $lines -join "`n" | Out-File "$W\asr_service.py" -Encoding UTF8 -NoNewline
 }
@@ -312,7 +312,7 @@ function Write-OcrService {
         "        if time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)",
         "threading.Thread(target=watcher, daemon=True).start()",
         "load_model()",
-        "HTTPServer(('0.0.0.0', 8013), H).serve_forever()"
+        "HTTPServer(('0.0.0.0', 8053), H).serve_forever()"
     )
     $lines -join "`n" | Out-File "$W\ocr_service.py" -Encoding UTF8 -NoNewline
 }
@@ -351,7 +351,7 @@ function Write-EmbedService {
         "        if time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)",
         "threading.Thread(target=watcher, daemon=True).start()",
         "load_model()",
-        "HTTPServer(('0.0.0.0', 8014), H).serve_forever()"
+        "HTTPServer(('0.0.0.0', 8054), H).serve_forever()"
     )
     $lines -join "`n" | Out-File "$W\embed_service.py" -Encoding UTF8 -NoNewline
 }
@@ -536,7 +536,7 @@ function Invoke-Deploy {
     $cfgObj | ConvertTo-Json -Depth 5 | Out-File "$W\config.json" -Encoding UTF8 -NoNewline
 
     # Clear stale state files
-    foreach ($port in 8010, 8011, 8013, 8014) {
+    foreach ($port in 8010, 8051, 8053, 8054) {
         "STARTING" | Out-File "$W\state_$port.txt" -Encoding UTF8 -NoNewline
     }
 
@@ -564,22 +564,22 @@ function Invoke-Deploy {
     $launchEmbed = $Mode -in @("doc","full")
 
     if ($launchAsr) {
-        Write-Host "  [ASR] Starting GigaAM port 8011..." -ForegroundColor Yellow
+        Write-Host "  [ASR] Starting GigaAM port 8051..." -ForegroundColor Yellow
         Write-AsrService
         Start-SpecialService "$W\asr_service.py" "$W\asr.log" 8011 "gigaam"
         "READY" | Out-File "$W\state_8011.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchOcr) {
-        Write-Host "  [OCR] Starting PaddleOCR port 8013..." -ForegroundColor Yellow
+        Write-Host "  [OCR] Starting PaddleOCR port 8053..." -ForegroundColor Yellow
         Write-OcrService
         Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013 "paddlepaddle paddleocr"
         "READY" | Out-File "$W\state_8013.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchEmbed) {
-        Write-Host "  [Embed] Starting RoSBERTa port 8014..." -ForegroundColor Yellow
+        Write-Host "  [Embed] Starting RoSBERTa port 8054..." -ForegroundColor Yellow
         Write-EmbedService
-        Start-SpecialService "$W\embed_service.py" "$W\embed.log" 8014 "sentence-transformers"
-        "READY" | Out-File "$W\state_8014.txt" -Encoding UTF8 -NoNewline
+        Start-SpecialService "$W\embed_service.py" "$W\embed.log" 8054 "sentence-transformers"
+        "READY" | Out-File "$W\state_8054.txt" -Encoding UTF8 -NoNewline
     }
 
     # Watchdog
@@ -595,9 +595,9 @@ function Invoke-Deploy {
     Write-Host "  Context: $ctxSize tokens"               -ForegroundColor Green
     Write-Host "  LLM:     http://localhost:8010/v1"      -ForegroundColor Green
     if ($Mode -eq "code") { Write-Host "  [code mode] Kodify-Nano-2B: optimised for code generation, completions, refactoring" -ForegroundColor Cyan }
-    if ($launchAsr)   { Write-Host "  ASR:     http://localhost:8011/v1/asr"        -ForegroundColor Cyan }
-    if ($launchOcr)   { Write-Host "  OCR:     http://localhost:8013/v1/ocr"        -ForegroundColor Cyan }
-    if ($launchEmbed) { Write-Host "  Embed:   http://localhost:8014/v1/embeddings" -ForegroundColor Cyan }
+    if ($launchAsr)   { Write-Host "  ASR:     http://localhost:8051/v1/asr"        -ForegroundColor Cyan }
+    if ($launchOcr)   { Write-Host "  OCR:     http://localhost:8053/v1/ocr"        -ForegroundColor Cyan }
+    if ($launchEmbed) { Write-Host "  Embed:   http://localhost:8054/v1/embeddings" -ForegroundColor Cyan }
     Write-Host ""
     Write-Host "  Idle timeouts: LLM=$($IDLE_LLM)s  ASR=$($IDLE_ASR)s  OCR=$($IDLE_OCR)s  Embed=$($IDLE_EMBED)s" -ForegroundColor Gray
     Write-Host "  Stop:    powershell -EP Bypass -File win_deploy.ps1 --stop"   -ForegroundColor Gray
