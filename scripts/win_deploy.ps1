@@ -411,21 +411,21 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
     $errLog = $logPath -replace "\.log$", "_err.log"
     
     if ($packages) {
-        Write-Host "  Preparing environment for port $port..." -ForegroundColor Gray
-        if ($port -eq 8013 -or $port -eq 8014) {
-             & python -m pip install --quiet torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-        }
+        Write-Host "  Aligning dependencies for $port (Torch 2.7.1+cu124)..." -ForegroundColor Gray
+        & python -m pip install --quiet --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --no-cache-dir
+        
         foreach ($pkg in $packages.Split(" ")) {
-            & python -m pip install --quiet --prefer-binary $pkg 2>&1 | Out-Null
+            Write-Host "  Installing $pkg..." -ForegroundColor Gray
+            & python -m pip install --quiet --prefer-binary $pkg 2>> $errLog | Out-Null
         }
     }
     
     Start-Process "python" -ArgumentList $scriptPath -WindowStyle Hidden `
         -RedirectStandardOutput $logPath -RedirectStandardError $errLog
     
-    Start-Sleep -s 8
+    Start-Sleep -s 10
     $tail = Get-Content $errLog -Tail 20 -ErrorAction SilentlyContinue
-    if ($tail -match "Traceback|ImportError|ModuleNotFoundError|LOAD_ERROR") {
+    if ($tail -match "Traceback|ImportError|ModuleNotFoundError|LOAD_ERROR|OSError") {
         Write-Host "  ERROR on port $port. Check log: cat $errLog" -ForegroundColor Red
     } else {
         Write-Host "  port $port started" -ForegroundColor Green
