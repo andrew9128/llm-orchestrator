@@ -691,7 +691,7 @@ function Invoke-Deploy {
         # Progress every 30s, show actual status
         if ($elapsed % 30 -eq 0) {
             $msg = if ($healthStatus) { $healthStatus } else { "no response yet" }
-            Write-Host "  loading... ($($elapsed)s, status: $msg)" -ForegroundColor Gray
+            Write-Host ("  loading... ({0}s, status: {1})" -f $elapsed, $msg) -ForegroundColor Gray
         }
     }
     if (!$ok) {
@@ -699,7 +699,7 @@ function Invoke-Deploy {
         if (Test-Path "$W\server.log") { Get-Content "$W\server.log" -Tail 30 }
         exit 1
     }
-    Write-Host "  LLM ready ($($elapsed)s)." -ForegroundColor Green
+    Write-Host ("  LLM ready ({0}s)." -f $elapsed) -ForegroundColor Green
     "READY" | Out-File "$W\state_8010.txt" -Encoding UTF8 -NoNewline
 
     $launchAsr   = $Mode -in @("voice","full")
@@ -746,7 +746,7 @@ function Invoke-Deploy {
     if ($launchOcr)   { Write-Host "  OCR:     http://localhost:8013/v1/ocr  (surya-ocr ru+en)" -ForegroundColor Cyan }
     if ($launchEmbed) { Write-Host "  Embed:   http://localhost:8014/v1/embeddings"              -ForegroundColor Cyan }
     Write-Host ""
-    Write-Host "  Idle timeouts: LLM=$($IDLE_LLM)s  ASR=$($IDLE_ASR)s  OCR=$($IDLE_OCR)s  Embed=$($IDLE_EMBED)s" -ForegroundColor Gray
+    Write-Host ("  Idle timeouts: LLM={0}s  ASR={1}s  OCR={2}s  Embed={3}s" -f $IDLE_LLM, $IDLE_ASR, $IDLE_OCR, $IDLE_EMBED) -ForegroundColor Gray
     Write-Host "  Stop:    powershell -EP Bypass -File win_deploy.ps1 --stop"   -ForegroundColor Gray
     Write-Host "  Status:  powershell -EP Bypass -File win_deploy.ps1 --status" -ForegroundColor Gray
 }
