@@ -338,7 +338,7 @@ function Write-EmbedService {
         "        from transformers import AutoTokenizer, RobertaModel",
         "        mid = 'ai-forever/ru-en-RoSBERTa'",
         "        _tok[0] = AutoTokenizer.from_pretrained(mid)",
-        "        # RobertaModel directly — avoids AutoModel pickle/class-registry errors",
+        "        # RobertaModel directly - avoids AutoModel pickle/class-registry errors",
         "        _mdl[0] = RobertaModel.from_pretrained(mid, add_pooling_layer=False)",
         "        _mdl[0].eval()",
         "        ready[0] = True",
@@ -547,7 +547,7 @@ function Invoke-Deploy {
 
     if ($launchOcr) {
         Write-Host "  [OCR] Starting surya-ocr port 8013..." -ForegroundColor Yellow
-        # Pin surya<0.7 — 0.7+ removed surya.ocr module entirely
+        # Pin surya<0.7 - 0.7+ removed surya.ocr module entirely
         Write-Host "  Installing surya-ocr (0.6.x)..." -ForegroundColor Gray
         & python -m pip install "surya-ocr>=0.4,<0.7" 2>&1 | Where-Object { $_ -match "Successfully|Collecting|ERROR|already" } | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
         Write-OcrService
