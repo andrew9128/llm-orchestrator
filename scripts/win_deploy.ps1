@@ -1,3 +1,4 @@
+# LLM WIN DEPLOY v14.1
 # On-demand model lifecycle: STOPPED -> LOADING -> READY -> IDLE -> STOPPED
 # All services (LLM, ASR, OCR, Embedding) start on request, unload on idle_timeout
 #
@@ -335,43 +336,62 @@ function Write-OcrService {
 }
 
 function Write-EmbedService {
+    # Direct transformers + mean pooling — avoids sentence-transformers hang on Windows
+    # Model: ai-forever/ru-en-RoSBERTa (already cached from previous run)
+    # Output: 768-dim embeddings, same as sentence-transformers would produce
     $lines = @(
         "import sys, json, os, time, threading",
         "from http.server import HTTPServer, BaseHTTPRequestHandler",
         "IDLE_TIMEOUT = $IDLE_EMBED",
         "last_req = [time.time()]",
-        "model = [None]",
-        "ready  = [False]",
-        "err_msg = [None]",
+        "_tok = [None]; _mdl = [None]; ready = [False]; err_msg = [None]",
+        "def mean_pool(token_emb, attn_mask):",
+        "    import torch",
+        "    mask = attn_mask.unsqueeze(-1).expand(token_emb.size()).float()",
+        "    return (torch.sum(token_emb * mask, 1) / torch.clamp(mask.sum(1), min=1e-9)).tolist()",
         "def load_model():",
         "    try:",
-        "        from sentence_transformers import SentenceTransformer",
-        "        model[0] = SentenceTransformer('ai-forever/ru-en-RoSBERTa')",
+        "        import torch",
+        "        from transformers import AutoTokenizer, AutoModel",
+        "        _tok[0] = AutoTokenizer.from_pretrained('ai-forever/ru-en-RoSBERTa')",
+        "        _mdl[0] = AutoModel.from_pretrained('ai-forever/ru-en-RoSBERTa')",
+        "        _mdl[0].eval()",
         "        ready[0] = True",
         "    except Exception as e:",
         "        err_msg[0] = str(e)",
         "        print(f'LOAD_ERROR: {e}', file=sys.stderr, flush=True)",
+        "def encode(texts):",
+        "    import torch",
+        "    enc = _tok[0](texts, padding=True, truncation=True, max_length=512, return_tensors='pt')",
+        "    with torch.no_grad():",
+        "        out = _mdl[0](**enc)",
+        "    return mean_pool(out.last_hidden_state, enc['attention_mask'])",
         "class H(BaseHTTPRequestHandler):",
         "    def log_message(self, f, *a): pass",
         "    def do_GET(self):",
         "        if self.path == '/health':",
         "            self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
         "            if ready[0]:     st = 'ok'",
-        "            elif err_msg[0]: st = 'error: ' + err_msg[0][:80]",
+        "            elif err_msg[0]: st = 'error: ' + err_msg[0][:120]",
         "            else:            st = 'loading'",
+        "            self.wfile.write(json.dumps({'status': st}).encode())",
         "    def do_POST(self):",
         "        if not ready[0]:",
         "            self.send_response(503); self.send_header('Content-Type','application/json'); self.end_headers()",
         "            self.wfile.write(json.dumps({'error': err_msg[0] or 'loading'}).encode()); return",
         "        last_req[0] = time.time()",
-        "        n = int(self.headers.get('Content-Length', 0))",
+        "        n    = int(self.headers.get('Content-Length', 0))",
         "        body = json.loads(self.rfile.read(n))",
         "        texts = body.get('input', [])",
         "        if isinstance(texts, str): texts = [texts]",
-        "        vecs = model[0].encode(texts).tolist()",
-        "        data = [{'index': i, 'embedding': v} for i, v in enumerate(vecs)]",
-        "        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
-        "        self.wfile.write(json.dumps({'object':'list','data':data}).encode())",
+        "        try:",
+        "            vecs = encode(texts)",
+        "            data = [{'index': i, 'embedding': v} for i, v in enumerate(vecs)]",
+        "            self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
+        "            self.wfile.write(json.dumps({'object':'list','data':data}).encode())",
+        "        except Exception as e:",
+        "            self.send_response(500); self.send_header('Content-Type','application/json'); self.end_headers()",
+        "            self.wfile.write(json.dumps({'error': str(e)}).encode())",
         "def watcher():",
         "    while True:",
         "        time.sleep(60)",
@@ -650,14 +670,20 @@ function Invoke-Deploy {
     }
     if ($launchOcr) {
         Write-Host "  [OCR] Starting PaddleOCR-VL-0.9B port 8013..." -ForegroundColor Yellow
+        # Clear cached model code — forces reload with updated transformers
+        $hfModCache = "$env:USERPROFILE\.cache\huggingface\modules\transformers_modules\PaddlePaddle"
+        if (Test-Path $hfModCache) {
+            Remove-Item $hfModCache -Recurse -Force -ErrorAction SilentlyContinue
+        }
         Write-OcrService
-        Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013 "torch torchvision transformers pillow einops"
+        & python -m pip install --quiet --upgrade "transformers>=4.47" 2>&1 | Out-Null
+        Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013 "torch torchvision einops pillow"
         "READY" | Out-File "$W\state_8013.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchEmbed) {
         Write-Host "  [Embed] Starting RoSBERTa port 8014..." -ForegroundColor Yellow
         Write-EmbedService
-        Start-SpecialService "$W\embed_service.py" "$W\embed.log" 8014 "sentence-transformers"
+        Start-SpecialService "$W\embed_service.py" "$W\embed.log" 8014 "torch transformers"
         "READY" | Out-File "$W\state_8014.txt" -Encoding UTF8 -NoNewline
     }
 
