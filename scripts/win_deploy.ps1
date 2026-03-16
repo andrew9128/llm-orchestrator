@@ -457,6 +457,18 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
         }
     }
 
+    # surya-ocr pulls CPU torchvision as a dependency - force CUDA build back after install
+    if ($packages -match "surya-ocr") {
+        Write-Host "  Pinning torchvision CUDA build (surya-ocr may have downgraded it)..." -ForegroundColor Gray
+        & python -m pip install --quiet torchvision --index-url https://download.pytorch.org/whl/cu124 --upgrade --force-reinstall --no-cache-dir 2>&1 | Out-Null
+        $tvCheck = & python -c "import torchvision.ops; torchvision.ops.nms; print('ok')" 2>$null
+        if ($tvCheck -eq "ok") {
+            Write-Host "  torchvision CUDA ops OK" -ForegroundColor Green
+        } else {
+            Write-Host "  WARNING: torchvision::nms still unavailable" -ForegroundColor Yellow
+        }
+    }
+
     Start-Process "python" -ArgumentList $scriptPath -WindowStyle Hidden `
         -RedirectStandardOutput $logPath -RedirectStandardError $errLog
 
