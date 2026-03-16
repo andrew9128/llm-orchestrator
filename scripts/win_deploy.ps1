@@ -691,7 +691,7 @@ function Invoke-Deploy {
         # Progress every 30s, show actual status
         if ($elapsed % 30 -eq 0) {
             $msg = if ($healthStatus) { $healthStatus } else { "no response yet" }
-            Write-Host "  loading... (${elapsed}s, status: $msg)" -ForegroundColor Gray
+            Write-Host "  loading... ($($elapsed)s, status: $msg)" -ForegroundColor Gray
         }
     }
     if (!$ok) {
@@ -699,7 +699,7 @@ function Invoke-Deploy {
         if (Test-Path "$W\server.log") { Get-Content "$W\server.log" -Tail 30 }
         exit 1
     }
-    Write-Host "  LLM ready (${elapsed}s)." -ForegroundColor Green
+    Write-Host "  LLM ready ($($elapsed)s)." -ForegroundColor Green
     "READY" | Out-File "$W\state_8010.txt" -Encoding UTF8 -NoNewline
 
     $launchAsr   = $Mode -in @("voice","full")
