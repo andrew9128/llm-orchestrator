@@ -1,4 +1,3 @@
-# LLM WIN DEPLOY v14.1
 # On-demand model lifecycle: STOPPED -> LOADING -> READY -> IDLE -> STOPPED
 # All services (LLM, ASR, OCR, Embedding) start on request, unload on idle_timeout
 #

@@ -1,4 +1,3 @@
-# LLM WATCHDOG v14.2
 # On-demand lifecycle for all services (LLM, ASR, OCR, Embedding)
 # Key fix: wake-proxy listens on STOPPED ports, catches requests, creates trigger
 # Flow: READY -> idle -> STOPPED -> wake-proxy on port -> trigger -> LOADING -> READY
