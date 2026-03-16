@@ -270,30 +270,26 @@ function Write-AsrService {
 }
 
 function Write-OcrService {
-    # surya-ocr: pure PyTorch, no custom model code, excellent Russian
-    # pip install surya-ocr  (~500 MB models auto-download on first use)
-    # Supports: printed + handwritten text, tables, mixed RU/EN docs
     $lines = @(
-        "import json, base64, tempfile, os, sys, time, threading, warnings",
+        "import sys, json, base64, tempfile, os, time, threading",
         "from http.server import HTTPServer, BaseHTTPRequestHandler",
-        "warnings.filterwarnings('ignore')",
-        "os.environ['TOKENIZERS_PARALLELISM'] = 'false'",
+        "os.environ['KMP_DUPLICATE_LIB_OK']='TRUE'",
         "IDLE_TIMEOUT = $IDLE_OCR",
         "last_req = [time.time()]",
         "_ocr = [None]; ready = [False]; err_msg = [None]",
         "def load_model():",
         "    try:",
+        "        import torch",
         "        from surya.ocr import run_ocr as _run",
         "        from surya.model.detection.model import load_model as load_det, load_processor as load_det_proc",
         "        from surya.model.recognition.model import load_model as load_rec",
         "        from surya.model.recognition.processor import load_processor as load_rec_proc",
-        "        det_m   = load_det()",
-        "        det_p   = load_det_proc()",
-        "        rec_m   = load_rec()",
-        "        rec_p   = load_rec_proc()",
+        "        det_m = load_det(); det_p = load_det_proc()",
+        "        rec_m = load_rec(); rec_p = load_rec_proc()",
         "        _ocr[0] = (_run, det_m, det_p, rec_m, rec_p)",
         "        ready[0] = True",
         "    except Exception as e:",
+        "        print(f'CRITICAL_LOAD_ERROR: {e}', file=sys.stderr)",
         "        err_msg[0] = str(e)",
         "        print(f'LOAD_ERROR: {e}', file=sys.stderr, flush=True)",
         "def do_ocr(image_path):",
@@ -415,17 +411,18 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
     $errLog = $logPath -replace "\.log$", "_err.log"
     
     if ($packages) {
+        Write-Host "  Preparing environment for port $port..." -ForegroundColor Gray
+        if ($port -eq 8013 -or $port -eq 8014) {
+             & python -m pip install --quiet torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+        }
         foreach ($pkg in $packages.Split(" ")) {
-            Write-Host "  Checking/Installing $pkg..." -ForegroundColor Gray
-            # Записываем результат установки в лог ошибок, чтобы мы могли его прочитать
-            & python -m pip install $pkg --no-cache-dir 2>> $errLog | Out-Null
+            & python -m pip install --quiet --prefer-binary $pkg 2>&1 | Out-Null
         }
     }
     
     Start-Process "python" -ArgumentList $scriptPath -WindowStyle Hidden `
         -RedirectStandardOutput $logPath -RedirectStandardError $errLog
     
-    # Даем модели время на инициализацию
     Start-Sleep -s 8
     $tail = Get-Content $errLog -Tail 20 -ErrorAction SilentlyContinue
     if ($tail -match "Traceback|ImportError|ModuleNotFoundError|LOAD_ERROR") {
