@@ -426,25 +426,27 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
     if ($packages -match "surya-ocr") {
         Write-Host "  Checking Surya-OCR requirements (Torch CUDA >= 2.7.0)..." -ForegroundColor Gray
         $currentTorch = & python -c "import torch; print(torch.__version__)" 2>$null
-        # Strip build suffix like +cu124, +cpu, etc. before version comparison
         $torchClean = ($currentTorch -split '\+')[0]
         if ($currentTorch -match '\+(.+)') { $torchBuild = $Matches[1] } else { $torchBuild = "" }
         $torchParts = $torchClean -split '\.'
         if ($torchParts.Count -gt 0) { $torchMajor = [int]$torchParts[0] } else { $torchMajor = 0 }
         if ($torchParts.Count -gt 1) { $torchMinor = [int]$torchParts[1] } else { $torchMinor = 0 }
-        $torchOld  = ($torchMajor -lt 2) -or ($torchMajor -eq 2 -and $torchMinor -lt 7)
-        $torchCpu  = ($torchBuild -eq "cpu") -or ($torchBuild -eq "")
+        $torchOld = ($torchMajor -lt 2) -or ($torchMajor -eq 2 -and $torchMinor -lt 7)
+        $torchCpu = ($torchBuild -eq "cpu") -or ($torchBuild -eq "")
         if ($torchOld -or $torchCpu) {
-            Write-Host "  Torch '$currentTorch' needs upgrade to CUDA build. Upgrading..." -ForegroundColor Yellow
+            Write-Host "  Torch '$currentTorch' needs CUDA build. Upgrading torch + torchvision..." -ForegroundColor Yellow
             & python -m pip install --quiet torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --upgrade --no-cache-dir 2>&1 | Out-Null
         } else {
-            # Even if torch is ok, torchvision must be present and matching
-            $tvOk = & python -c "import torchvision; print('ok')" 2>$null
-            if ($tvOk -ne "ok") {
-                Write-Host "  torchvision missing, installing..." -ForegroundColor Yellow
-                & python -m pip install --quiet torchvision --index-url https://download.pytorch.org/whl/cu124 --no-cache-dir 2>&1 | Out-Null
-            }
             Write-Host "  Torch '$currentTorch' OK" -ForegroundColor Green
+        }
+        # Always force-reinstall torchvision from cu124 index to guarantee CUDA ops are present
+        Write-Host "  Ensuring torchvision CUDA build..." -ForegroundColor Gray
+        & python -m pip install --quiet torchvision --index-url https://download.pytorch.org/whl/cu124 --upgrade --force-reinstall --no-cache-dir 2>&1 | Out-Null
+        $tvCheck = & python -c "import torchvision.ops; torchvision.ops.nms; print('ok')" 2>$null
+        if ($tvCheck -eq "ok") {
+            Write-Host "  torchvision CUDA ops OK" -ForegroundColor Green
+        } else {
+            Write-Host "  WARNING: torchvision::nms still unavailable - OCR may fail" -ForegroundColor Yellow
         }
     }
 
