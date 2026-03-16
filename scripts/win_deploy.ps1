@@ -424,19 +424,27 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
     $errLog = $logPath -replace "\.log$", "_err.log"
 
     if ($packages -match "surya-ocr") {
-        Write-Host "  Checking Surya-OCR requirements (Torch >= 2.7.0)..." -ForegroundColor Gray
+        Write-Host "  Checking Surya-OCR requirements (Torch CUDA >= 2.7.0)..." -ForegroundColor Gray
         $currentTorch = & python -c "import torch; print(torch.__version__)" 2>$null
         # Strip build suffix like +cu124, +cpu, etc. before version comparison
         $torchClean = ($currentTorch -split '\+')[0]
+        if ($currentTorch -match '\+(.+)') { $torchBuild = $Matches[1] } else { $torchBuild = "" }
         $torchParts = $torchClean -split '\.'
         if ($torchParts.Count -gt 0) { $torchMajor = [int]$torchParts[0] } else { $torchMajor = 0 }
         if ($torchParts.Count -gt 1) { $torchMinor = [int]$torchParts[1] } else { $torchMinor = 0 }
-        $torchOld = ($torchMajor -lt 2) -or ($torchMajor -eq 2 -and $torchMinor -lt 7)
-        if ($torchOld) {
-            Write-Host "  Torch version $currentTorch is too old. Upgrading..." -ForegroundColor Yellow
-            & python -m pip install --quiet torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --upgrade --no-cache-dir
+        $torchOld  = ($torchMajor -lt 2) -or ($torchMajor -eq 2 -and $torchMinor -lt 7)
+        $torchCpu  = ($torchBuild -eq "cpu") -or ($torchBuild -eq "")
+        if ($torchOld -or $torchCpu) {
+            Write-Host "  Torch '$currentTorch' needs upgrade to CUDA build. Upgrading..." -ForegroundColor Yellow
+            & python -m pip install --quiet torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --upgrade --no-cache-dir 2>&1 | Out-Null
         } else {
-            Write-Host "  Torch version $currentTorch OK" -ForegroundColor Green
+            # Even if torch is ok, torchvision must be present and matching
+            $tvOk = & python -c "import torchvision; print('ok')" 2>$null
+            if ($tvOk -ne "ok") {
+                Write-Host "  torchvision missing, installing..." -ForegroundColor Yellow
+                & python -m pip install --quiet torchvision --index-url https://download.pytorch.org/whl/cu124 --no-cache-dir 2>&1 | Out-Null
+            }
+            Write-Host "  Torch '$currentTorch' OK" -ForegroundColor Green
         }
     }
 
@@ -726,7 +734,9 @@ function Invoke-Deploy {
     if ($launchEmbed) {
         Write-Host "  [Embed] Starting RoSBERTa port 8014..." -ForegroundColor Yellow
         Write-EmbedService
-        Start-SpecialService "$W\embed_service.py" "$W\embed.log" 8014 "torch transformers"
+        # RoSBERTa needs transformers 4.x and torch (CPU is fine for embeddings)
+        # Install in correct order to avoid version conflicts
+        Start-SpecialService "$W\embed_service.py" "$W\embed.log" 8014 "transformers==4.44.2 torch"
         "READY" | Out-File "$W\state_8014.txt" -Encoding UTF8 -NoNewline
     }
 
