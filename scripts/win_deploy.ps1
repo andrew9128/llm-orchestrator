@@ -435,10 +435,10 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
         $torchOld = ($torchMajor -lt 2) -or ($torchMajor -eq 2 -and $torchMinor -lt 7)
         $torchCpu = ($torchBuild -eq "cpu") -or ($torchBuild -eq "")
         $torchStamp = Get-Stamp "torch_cuda"
-        if (($torchOld -or $torchCpu) -and $torchStamp -ne "cu124") {
+        if (($torchOld -or $torchCpu) -and $torchStamp -ne "cu128") {
             Write-Host "  Torch '$currentTorch' needs CUDA. Upgrading..." -ForegroundColor Yellow
-            & python -m pip install --quiet torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --upgrade --no-cache-dir 2>&1 | Out-Null
-            Set-Stamp "torch_cuda" "cu124"
+            & python -m pip install --quiet torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 --upgrade --no-cache-dir 2>&1 | Out-Null
+            Set-Stamp "torch_cuda" "cu128"
         } else {
             Write-Host "  Torch '$currentTorch' OK" -ForegroundColor Green
         }
@@ -473,10 +473,10 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
         # torchvision CUDA pin - AFTER surya install (surya pulls CPU torchvision)
         $tvBuild = & python -c "import torchvision; v=torchvision.__version__; print('cuda' if '+cu' in v else 'cpu')" 2>$null
         $tvStamp = Get-Stamp "torchvision_cuda"
-        if ($tvBuild -ne "cuda" -or $tvStamp -ne "cu124") {
+        if ($tvBuild -ne "cuda" -or $tvStamp -ne "cu128") {
             Write-Host "  Pinning torchvision CUDA..." -ForegroundColor Yellow
-            & python -m pip install --quiet torchvision --index-url https://download.pytorch.org/whl/cu124 --upgrade --force-reinstall --no-cache-dir 2>&1 | Out-Null
-            Set-Stamp "torchvision_cuda" "cu124"
+            & python -m pip install --quiet torchvision --index-url https://download.pytorch.org/whl/cu128 --upgrade --force-reinstall --no-cache-dir 2>&1 | Out-Null
+            Set-Stamp "torchvision_cuda" "cu128"
         } else {
             Write-Host "  torchvision CUDA OK (cached)" -ForegroundColor Green
         }
@@ -511,19 +511,59 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
     Start-Process "python" -ArgumentList $scriptPath -WindowStyle Hidden `
         -RedirectStandardOutput $logPath -RedirectStandardError $errLog
 
-    Start-Sleep -s 10
+    # Poll /health until ok, loading, or error (don't just Sleep 10)
+    $svcElapsed = 0
+    while ($svcElapsed -lt 300) {
+        Start-Sleep -s 3
+        $svcElapsed += 3
+        try {
+            $req2 = [System.Net.HttpWebRequest]::Create("http://localhost:$port/health")
+            $req2.Timeout = 5000; $req2.Method = "GET"
+            try {
+                $resp2 = $req2.GetResponse()
+                $sr3 = [System.IO.StreamReader]::new($resp2.GetResponseStream())
+                $body3 = $sr3.ReadToEnd(); $sr3.Close(); $resp2.Close()
+                $st = ($body3 | ConvertFrom-Json -ErrorAction SilentlyContinue).status
+            } catch [System.Net.WebException] {
+                $wr = $_.Exception.Response
+                if ($wr) {
+                    $sr4 = [System.IO.StreamReader]::new($wr.GetResponseStream())
+                    $body4 = $sr4.ReadToEnd(); $sr4.Close()
+                    $st = ($body4 | ConvertFrom-Json -ErrorAction SilentlyContinue).status
+                } else { $st = "" }
+            }
+            if ($st -eq "ok") {
+                Write-Host "  Service :$port ready ($svcElapsed s)" -ForegroundColor Green
+                break
+            }
+            if ($st -and $st -ne "loading") {
+                Write-Host "  Service :$port status: $st" -ForegroundColor Yellow
+                break
+            }
+            if ($svcElapsed % 30 -eq 0) {
+                Write-Host ("  Service :{0} loading... {1}s" -f $port, $svcElapsed) -ForegroundColor Gray
+            }
+        } catch {}
+    }
 }
 
 # =============================================================================
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM AUTO-DEPLOY v14.2-fix5 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM AUTO-DEPLOY v14.2-fix3 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
     Write-Host "    On-demand: services start on request, auto-unload on idle" -ForegroundColor Gray
 
     Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -s 1
     New-Item -ItemType Directory -Path "$W\models" -Force | Out-Null
+    # Reset torch/torchvision stamps if they point to cu124 - force upgrade to cu128 (RTX 5060 CC12.0 requires CUDA 12.8)
+    if ((Get-Stamp "torch_cuda") -eq "cu124")       { Remove-Item "$W\stamp_torch_cuda.txt"       -ErrorAction SilentlyContinue }
+    if ((Get-Stamp "torchvision_cuda") -eq "cu124") { Remove-Item "$W\stamp_torchvision_cuda.txt" -ErrorAction SilentlyContinue }
+    if ((Get-Stamp "surya_cache") -ne "") {
+        # Also reset surya model cache stamp to force re-download with new torch
+        Remove-Item "$W\stamp_surya_cache.txt" -ErrorAction SilentlyContinue
+    }
     $tag = "b5248"
 
     # [1] System deps
