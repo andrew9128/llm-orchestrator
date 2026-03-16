@@ -293,6 +293,16 @@ function Write-OcrService {
         "_ocr = [None]; ready = [False]; err_msg = [None]",
         "def load_model():",
         "    try:",
+        "        import shutil, os",
+        "        hf = os.path.expanduser(r'~/.cache/huggingface/hub')",
+        "        surya_ver_file = os.path.join(hf, 'surya_ocr_ver.txt')",
+        "        import surya; cur_ver = getattr(surya, '__version__', 'unknown')",
+        "        cached_ver = open(surya_ver_file).read().strip() if os.path.exists(surya_ver_file) else ''",
+        "        if cached_ver != cur_ver:",
+        "            for d in os.listdir(hf) if os.path.isdir(hf) else []:",
+        "                if 'surya' in d.lower() or 'vikp' in d.lower():",
+        "                    shutil.rmtree(os.path.join(hf, d), ignore_errors=True)",
+        "            open(surya_ver_file, 'w').write(cur_ver)",
         "        from surya.detection import DetectionPredictor",
         "        from surya.recognition import RecognitionPredictor",
         "        det_pred = DetectionPredictor()",
@@ -426,7 +436,7 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
     $errLog = $logPath -replace "\.log$", "_err.log"
 
     if ($packages -match "surya-ocr") {
-        Write-Host "  Checking Surya-OCR requirements (Torch CUDA >= 2.7.0)..." -ForegroundColor Gray
+        # Torch CUDA check
         $currentTorch = & python -c "import torch; print(torch.__version__)" 2>$null
         $torchClean = ($currentTorch -split '\+')[0]
         if ($currentTorch -match '\+(.+)') { $torchBuild = $Matches[1] } else { $torchBuild = "" }
@@ -436,38 +446,55 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
         $torchOld = ($torchMajor -lt 2) -or ($torchMajor -eq 2 -and $torchMinor -lt 7)
         $torchCpu = ($torchBuild -eq "cpu") -or ($torchBuild -eq "")
         if ($torchOld -or $torchCpu) {
-            Write-Host "  Torch '$currentTorch' needs CUDA build. Upgrading torch + torchvision..." -ForegroundColor Yellow
+            Write-Host "  Torch '$currentTorch' needs CUDA. Upgrading..." -ForegroundColor Yellow
             & python -m pip install --quiet torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --upgrade --no-cache-dir 2>&1 | Out-Null
         } else {
             Write-Host "  Torch '$currentTorch' OK" -ForegroundColor Green
         }
-        # Always force-reinstall torchvision from cu124 index to guarantee CUDA ops are present
-        Write-Host "  Ensuring torchvision CUDA build..." -ForegroundColor Gray
-        & python -m pip install --quiet torchvision --index-url https://download.pytorch.org/whl/cu124 --upgrade --force-reinstall --no-cache-dir 2>&1 | Out-Null
+
+        # surya-ocr install with stamp
+        $suryaInstalled = & python -c "import surya; print(surya.__version__)" 2>$null
+        $suryaStamp = Get-Stamp "surya_ocr"
+        if ($suryaStamp -ne $suryaInstalled -or -not $suryaInstalled) {
+            Write-Host "  Installing surya-ocr..." -ForegroundColor Gray
+            & python -m pip install --quiet --prefer-binary "surya-ocr" 2>> $errLog | Out-Null
+            $suryaInstalled = & python -c "import surya; print(surya.__version__)" 2>$null
+            if ($suryaInstalled) { Set-Stamp "surya_ocr" $suryaInstalled }
+        } else {
+            Write-Host "  surya-ocr $suryaInstalled (cached, skipping)" -ForegroundColor Green
+        }
+
+        # torchvision CUDA pin - AFTER surya install (surya pulls CPU torchvision)
+        $tvBuild = & python -c "import torchvision; v=torchvision.__version__; print('cuda' if '+cu' in v else 'cpu')" 2>$null
+        if ($tvBuild -ne "cuda") {
+            Write-Host "  Pinning torchvision CUDA..." -ForegroundColor Yellow
+            & python -m pip install --quiet torchvision --index-url https://download.pytorch.org/whl/cu124 --upgrade --force-reinstall --no-cache-dir 2>&1 | Out-Null
+        }
         $tvCheck = & python -c "import torchvision.ops; torchvision.ops.nms; print('ok')" 2>$null
         if ($tvCheck -eq "ok") {
             Write-Host "  torchvision CUDA ops OK" -ForegroundColor Green
         } else {
-            Write-Host "  WARNING: torchvision::nms still unavailable - OCR may fail" -ForegroundColor Yellow
+            Write-Host "  WARNING: torchvision::nms unavailable" -ForegroundColor Yellow
         }
-    }
-
-    if ($packages) {
-        foreach ($pkg in $packages.Split(" ")) {
-            Write-Host "  Installing $pkg..." -ForegroundColor Gray
-            & python -m pip install --quiet --prefer-binary $pkg 2>> $errLog | Out-Null
-        }
-    }
-
-    # surya-ocr pulls CPU torchvision as a dependency - force CUDA build back after install
-    if ($packages -match "surya-ocr") {
-        Write-Host "  Pinning torchvision CUDA build (surya-ocr may have downgraded it)..." -ForegroundColor Gray
-        & python -m pip install --quiet torchvision --index-url https://download.pytorch.org/whl/cu124 --upgrade --force-reinstall --no-cache-dir 2>&1 | Out-Null
-        $tvCheck = & python -c "import torchvision.ops; torchvision.ops.nms; print('ok')" 2>$null
-        if ($tvCheck -eq "ok") {
-            Write-Host "  torchvision CUDA ops OK" -ForegroundColor Green
-        } else {
-            Write-Host "  WARNING: torchvision::nms still unavailable" -ForegroundColor Yellow
+    } else {
+        # Non-surya packages: install with stamp
+        if ($packages) {
+            foreach ($pkg in $packages.Split(" ")) {
+                $pkgKey = "pkg_" + ($pkg -replace "[^a-zA-Z0-9]", "_")
+                $pkgName = ($pkg -split "==")[0]
+                if ($pkg -match "==(.+)") { $wantVer = $Matches[1] } else { $wantVer = "" }
+                $installedVer = & python -c "import importlib.metadata; print(importlib.metadata.version('$pkgName'))" 2>$null
+                $cachedVer = Get-Stamp $pkgKey
+                $needInstall = (-not $installedVer) -or ($wantVer -and $installedVer -ne $wantVer) -or ($cachedVer -ne $installedVer)
+                if ($needInstall) {
+                    Write-Host "  Installing $pkg..." -ForegroundColor Gray
+                    & python -m pip install --quiet --prefer-binary $pkg 2>> $errLog | Out-Null
+                    $installedVer = & python -c "import importlib.metadata; print(importlib.metadata.version('$pkgName'))" 2>$null
+                    if ($installedVer) { Set-Stamp $pkgKey $installedVer }
+                } else {
+                    Write-Host "  $pkgName $installedVer (cached, skipping)" -ForegroundColor Green
+                }
+            }
         }
     }
 
