@@ -293,11 +293,11 @@ function Write-OcrService {
         "_ocr = [None]; ready = [False]; err_msg = [None]",
         "def load_model():",
         "    try:",
-        "        from surya.detection import DetectionPredictor",
         "        from surya.recognition import RecognitionPredictor",
-        "        det_pred = DetectionPredictor()",
+        "        from surya.detection import DetectionPredictor",
         "        rec_pred = RecognitionPredictor()",
-        "        _ocr[0] = (det_pred, rec_pred)",
+        "        det_pred = DetectionPredictor()",
+        "        _ocr[0] = (rec_pred, det_pred)",
         "        ready[0] = True",
         "    except Exception as e:",
         "        print(f'CRITICAL_LOAD_ERROR: {e}', file=sys.stderr)",
@@ -305,9 +305,9 @@ function Write-OcrService {
         "        print(f'LOAD_ERROR: {e}', file=sys.stderr, flush=True)",
         "def do_ocr(image_path):",
         "    from PIL import Image",
-        "    det_pred, rec_pred = _ocr[0]",
-        "    img  = Image.open(image_path).convert('RGB')",
-        "    res  = rec_pred([img], [['ru', 'en']], det_pred)",
+        "    rec_pred, det_pred = _ocr[0]",
+        "    img = Image.open(image_path).convert('RGB')",
+        "    res = rec_pred([img], [['ru', 'en']], det_pred)",
         "    lines = [line.text for page in res for line in page.text_lines if line.text.strip()]",
         "    return chr(10).join(lines)",
         "class H(BaseHTTPRequestHandler):",
@@ -443,24 +443,31 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
             Write-Host "  Torch '$currentTorch' OK" -ForegroundColor Green
         }
 
-        # surya-ocr install with stamp (pin <0.7 to keep stable API)
+        # surya-ocr install with stamp (pin >=0.9,<0.10 for stable API)
         $suryaStamp = Get-Stamp "surya_ocr"
         $suryaInstalled = & python -m pip show surya-ocr 2>$null | Select-String "^Version:" | ForEach-Object { $_ -replace "Version:\s*","" }
-        if ($suryaStamp -ne "$suryaInstalled" -or -not $suryaInstalled) {
+        if ($suryaInstalled) { $suryaInstalled = "$suryaInstalled".Trim() }
+        $cacheStamp = Get-Stamp "surya_cache"
+        if ($suryaStamp -ne $suryaInstalled -or -not $suryaInstalled) {
             Write-Host "  Installing surya-ocr..." -ForegroundColor Gray
             & python -m pip install --quiet --prefer-binary "surya-ocr>=0.9,<0.10" 2>> $errLog | Out-Null
             $suryaInstalled = & python -m pip show surya-ocr 2>$null | Select-String "^Version:" | ForEach-Object { $_ -replace "Version:\s*","" }
-            if ($suryaInstalled) { Set-Stamp "surya_ocr" "$suryaInstalled" }
-            # Clear stale HF model cache for surya (old config.json lacks bbox_size)
+            if ($suryaInstalled) { Set-Stamp "surya_ocr" $suryaInstalled }
+        } else {
+            Write-Host "  surya-ocr $suryaInstalled (cached, skipping)" -ForegroundColor Green
+        }
+        # Clear stale HF model cache whenever cache stamp differs from installed version
+        # 'encoder'/'bbox_size' errors = stale model config from a different surya version
+        if ($cacheStamp -ne $suryaInstalled -and $suryaInstalled) {
+            Write-Host "  Clearing stale surya model cache..." -ForegroundColor Yellow
             $hfHub = "$env:USERPROFILE\.cache\huggingface\hub"
             if (Test-Path $hfHub) {
                 Get-ChildItem $hfHub -Directory | Where-Object { $_.Name -match "surya|vikp" } | ForEach-Object {
                     Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-                    Write-Host "  Cleared stale cache: $($_.Name)" -ForegroundColor Gray
+                    Write-Host "  Removed: $($_.Name)" -ForegroundColor Gray
                 }
             }
-        } else {
-            Write-Host "  surya-ocr $suryaInstalled (cached, skipping)" -ForegroundColor Green
+            Set-Stamp "surya_cache" $suryaInstalled
         }
 
         # torchvision CUDA pin - AFTER surya install (surya pulls CPU torchvision)
@@ -511,7 +518,7 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM AUTO-DEPLOY v14.2-fix4 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM AUTO-DEPLOY v14.2-fix3 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
     Write-Host "    On-demand: services start on request, auto-unload on idle" -ForegroundColor Gray
 
     Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
