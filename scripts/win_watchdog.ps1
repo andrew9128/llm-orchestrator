@@ -210,7 +210,7 @@ function Load-Config {
 # =============================================================================
 # MAIN
 # =============================================================================
-Log "Watchdog v14.2 started."
+Log "Watchdog v14.3 started."
 
 $cfg = Load-Config
 Log "Idle timeouts: LLM=$($cfg.idleLlm)s ASR=$($cfg.idleAsr)s OCR=$($cfg.idleOcr)s Embed=$($cfg.idleEmbed)s"
