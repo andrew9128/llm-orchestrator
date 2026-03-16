@@ -72,7 +72,7 @@ function Invoke-Status {
     $portMap = @{
         8010 = "LLM (llama-server)"
         8011 = "ASR (GigaAM)"
-        8013 = "OCR (EasyOCR)"
+        8013 = "OCR (PaddleOCR-VL)"
         8014 = "Embedding (RoSBERTa)"
     }
     foreach ($port in 8010, 8011, 8013, 8014) {
@@ -132,30 +132,36 @@ function Install-Pkg($pkgId, $label) {
 
 function Download-Model($url, $dest) {
     Remove-Item $dest -ErrorAction SilentlyContinue
-    $hfRepo = ""
-    $hfFile = ""
+    $hfRepo = ""; $hfFile = ""
     if ($url -match "huggingface\.co/([^/]+/[^/]+)/resolve/[^/]+/(.+)") {
-        $hfRepo = $Matches[1]
-        $hfFile = $Matches[2]
+        $hfRepo = $Matches[1]; $hfFile = $Matches[2]
     }
     if ($hfRepo) {
-        Write-Host "  Trying huggingface-hub: $hfRepo / $hfFile" -ForegroundColor Gray
         $dlDir = Split-Path $dest -Parent
         $pyCode = @"
-from huggingface_hub import hf_hub_download
-import shutil, os
-p = hf_hub_download(repo_id='$hfRepo', filename='$hfFile', local_dir=r'$dlDir')
-if os.path.abspath(p) != os.path.abspath(r'$dest'):
-    shutil.move(p, r'$dest')
-print('hf-ok')
+import sys
+try:
+    from huggingface_hub import hf_hub_download
+    import shutil, os
+    p = hf_hub_download(repo_id='$hfRepo', filename='$hfFile',
+        local_dir=r'$dlDir', local_dir_use_symlinks=False, resume_download=True)
+    p = os.path.abspath(p); d = os.path.abspath(r'$dest')
+    if p != d: shutil.move(p, d)
+    print(f'hf-ok:{os.path.getsize(d)}')
+except Exception as e:
+    print(f'hf-err:{e}', file=sys.stderr)
 "@
-        & python -c $pyCode 2>&1 | ForEach-Object {
-            if ($_ -match "hf-ok") { Write-Host "  huggingface-hub: OK" -ForegroundColor Green }
-        }
+        $out = & python -c $pyCode 2>&1
+        $ok  = $out | Where-Object { $_ -match "^hf-ok:" }
+        $err = $out | Where-Object { $_ -match "^hf-err:" }
+        if ($err) { Write-Host "  hf-hub: $($err -replace 'hf-err:','')" -ForegroundColor Yellow }
     }
-    if (!(Test-Path $dest) -or (Get-Item $dest -EA SilentlyContinue).Length -lt 100MB) {
-        Write-Host "  Trying curl fallback..." -ForegroundColor Gray
-        curl.exe -L --retry 3 $url -o $dest
+    # curl fallback: --location follows redirects, --header skips LFS pointer redirect
+    if (!(Test-Path $dest) -or (Get-Item $dest -EA SilentlyContinue).Length -lt 1MB) {
+        curl.exe -L --retry 3 --retry-delay 2 `
+            -H "User-Agent: Mozilla/5.0" `
+            -H "Accept: application/octet-stream" `
+            $url -o $dest 2>&1 | Out-Null
     }
     if (Test-Path $dest) { return (Get-Item $dest).Length }
     return 0
@@ -177,9 +183,12 @@ function Select-BestModel($vramMb, $deployMode) {
     if ($deployMode -eq "voice") { $specialMb = 512  }
     if ($deployMode -eq "doc")   { $specialMb = 1500 }
     if ($deployMode -eq "full")  { $specialMb = 2000 }
-    # code mode: force kodify-2b-q8 regardless of VRAM
+    # code mode: force Kodify-Nano-2.0 regardless of VRAM
     if ($deployMode -eq "code") {
-        return [PSCustomObject]@{ name="kodify-2b-q8"; file="kodify-2b-q8.gguf"; minVram=3200; url="https://huggingface.co/MTSAIR/Kodify-Nano-GGUF/resolve/main/Kodify-Nano-q8_0.gguf" }
+        return [PSCustomObject]@{
+            name="kodify-2b-q8"; file="kodify-2b-q8.gguf"; minVram=3200
+            url="https://huggingface.co/mradermacher/Kodify-Nano-2.0-GGUF/resolve/main/Kodify-Nano-2.0.Q8_0.gguf"
+        }
     }
     $budget = $vramMb - 1200 - $specialMb
 
@@ -280,21 +289,40 @@ function Write-AsrService {
 }
 
 function Write-OcrService {
-    # Using easyocr - much more reliable on Windows than PaddleOCR
-    # Models downloaded on first run to ~/.EasyOCR/model/ (~200 MB)
+    # PaddleOCR-VL 0.9B via HuggingFace transformers
+    # NO paddlepaddle framework - pure torch+transformers, no shm.dll conflicts
+    # 109 languages incl Russian, tables, formulas. Requires GPU (~2GB VRAM).
+    # Models: ~1.8GB auto-download to ~/.cache/huggingface on first run
+    # Install: pip install torch transformers>=4.55 pillow
     $lines = @(
-        "import json, base64, tempfile, os, time, threading",
+        "import json, base64, tempfile, os, time, threading, warnings",
         "from http.server import HTTPServer, BaseHTTPRequestHandler",
+        "warnings.filterwarnings('ignore')",
+        "os.environ['TOKENIZERS_PARALLELISM'] = 'false'",
         "IDLE_TIMEOUT = $IDLE_OCR",
         "last_req = [time.time()]",
-        "reader = [None]",
+        "_mdl = [None]; _prc = [None]",
         "def load_model():",
-        "    if reader[0] is None:",
-        "        import easyocr",
-        "        # gpu=False: CPU inference, stable on all Windows setups",
-        "        # ru+en handles mixed documents",
-        "        reader[0] = easyocr.Reader(['ru', 'en'], gpu=False, verbose=False)",
-        "    return reader[0]",
+        "    if _mdl[0] is None:",
+        "        import torch",
+        "        from transformers import AutoModelForCausalLM, AutoProcessor",
+        "        dev = 'cuda' if torch.cuda.is_available() else 'cpu'",
+        "        _prc[0] = AutoProcessor.from_pretrained('PaddlePaddle/PaddleOCR-VL', trust_remote_code=True)",
+        "        _mdl[0] = AutoModelForCausalLM.from_pretrained(",
+        "            'PaddlePaddle/PaddleOCR-VL', trust_remote_code=True,",
+        "            torch_dtype=torch.bfloat16).to(dev).eval()",
+        "def run_ocr(path):",
+        "    import torch",
+        "    from PIL import Image",
+        "    dev = 'cuda' if torch.cuda.is_available() else 'cpu'",
+        "    img = Image.open(path).convert('RGB')",
+        "    msgs = [{'role':'user','content':'OCR:'}]",
+        "    txt  = _prc[0].apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)",
+        "    inp  = _prc[0](text=[txt], images=[img], return_tensors='pt')",
+        "    inp  = {k: v.to(dev) for k, v in inp.items() if hasattr(v,'to')}",
+        "    with torch.inference_mode():",
+        "        ids = _mdl[0].generate(**inp, max_new_tokens=2048, do_sample=False)",
+        "    return _prc[0].batch_decode(ids, skip_special_tokens=True)[0].strip()",
         "class H(BaseHTTPRequestHandler):",
         "    def log_message(self, f, *a): pass",
         "    def do_GET(self):",
@@ -303,19 +331,15 @@ function Write-OcrService {
         "            self.wfile.write(json.dumps({'status':'ok'}).encode())",
         "    def do_POST(self):",
         "        last_req[0] = time.time()",
-        "        n = int(self.headers.get('Content-Length', 0))",
+        "        n    = int(self.headers.get('Content-Length', 0))",
         "        body = json.loads(self.rfile.read(n))",
-        "        img = base64.b64decode(body.get('image', ''))",
-        "        ext = body.get('ext', '.png')",
+        "        img  = base64.b64decode(body.get('image', ''))",
+        "        ext  = body.get('ext', '.png')",
         "        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:",
         "            f.write(img); tmp = f.name",
-        "        try:",
-        "            results = load_model().readtext(tmp, detail=0, paragraph=True)",
-        "            text = chr(10).join(results) if results else ''",
-        "        except Exception as e:",
-        "            text = 'ERROR: ' + str(e)",
-        "        finally:",
-        "            os.unlink(tmp)",
+        "        try:    text = run_ocr(tmp)",
+        "        except Exception as e: text = 'ERROR: ' + str(e)",
+        "        finally: os.unlink(tmp)",
         "        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
         "        self.wfile.write(json.dumps({'text': text}).encode())",
         "def watcher():",
@@ -378,31 +402,26 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
     }
     $errLog = $logPath -replace "\.log$", "_err.log"
     Start-Process "python" -ArgumentList $scriptPath -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errLog
-    for ($i = 1; $i -le 15; $i++) {
+    for ($i = 1; $i -le 20; $i++) {
         Start-Sleep -s 2
         try {
             $r = Invoke-WebRequest -Uri "http://localhost:$port/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
             $h = ($r.Content | ConvertFrom-Json).status
-            if ($h -eq "ok") { Write-Host "  Port $port UP" -ForegroundColor Green; return }
+            if ($h -eq "ok") { return }
         } catch {}
-        Write-Host "  [$i] waiting port $port..." -ForegroundColor Gray
     }
-    Write-Host "  WARNING: port $port not up in time" -ForegroundColor Yellow
+    Write-Host "  WARNING: service on port $port not ready in 40s, check log: $errLog" -ForegroundColor Yellow
 }
 
 # =============================================================================
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM AUTO-DEPLOY v14.0 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
-    Write-Host "    On-demand: all services start on request, auto-unload on idle" -ForegroundColor Gray
+    Write-Host "--- LLM AUTO-DEPLOY v14.2 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "    On-demand: services start on request, auto-unload on idle" -ForegroundColor Gray
 
     Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -s 2
-    @("$W\bin","$W\bin_vulkan") | ForEach-Object {
-        if (Test-Path $_) { Remove-Item -Recurse -Force $_ -ErrorAction SilentlyContinue }
-    }
-    New-Item -ItemType Directory -Path "$W\bin"    -Force | Out-Null
+    Start-Sleep -s 1
     New-Item -ItemType Directory -Path "$W\models" -Force | Out-Null
     $tag = "b5248"
 
@@ -538,18 +557,26 @@ function Invoke-Deploy {
         Write-Host "  Downloading $($candidate.name)..." -ForegroundColor Yellow
         $sz = Download-Model $candidate.url $m
         if ($sz -le 100MB) {
-            Write-Host "  Download failed - trying q4 fallback..." -ForegroundColor Yellow
+            # Try q4 variant of same model
             Remove-Item $m -ErrorAction SilentlyContinue
-            $fbUrl  = $candidate.url  -replace "Q[5-9]_[K0](_[Mm])?", "Q4_K_M"
+            $fbUrl  = $candidate.url  -replace "\.(Q[5-9]|q[5-9])[^/]*\.gguf$", ".Q4_K_M.gguf"
             $fbFile = $candidate.file -replace "q[5-9]", "q4"
-            $m = "$W\models\$fbFile"
-            if (!(Test-Path $m) -or (Get-Item $m -EA SilentlyContinue).Length -lt 100MB) {
-                $sz = Download-Model $fbUrl $m
+            if ($fbUrl -eq $candidate.url) {
+                # URL didn't change (q4 pattern didn't match) - skip to emergency
+                $sz = 0
+            } else {
+                Write-Host "  Download failed - trying q4 fallback..." -ForegroundColor Yellow
+                $m = "$W\models\$fbFile"
+                if (!(Test-Path $m) -or (Get-Item $m -EA SilentlyContinue).Length -lt 100MB) {
+                    $sz = Download-Model $fbUrl $m
+                } else { $sz = (Get-Item $m).Length }
             }
             if ($sz -le 100MB) {
                 Write-Host "  Trying emergency fallback qvikhr-4b-q4..." -ForegroundColor Red
                 $m = "$W\models\qvikhr-4b-q4.gguf"
-                $sz = Download-Model "https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruct-GGUF/resolve/main/qvikhr-3-4b-instruct-q4_k_m.gguf" $m
+                if (!(Test-Path $m) -or (Get-Item $m -EA SilentlyContinue).Length -lt 100MB) {
+                    $sz = Download-Model "https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruct-GGUF/resolve/main/qvikhr-3-4b-instruct-q4_k_m.gguf" $m
+                } else { $sz = (Get-Item $m).Length }
                 if ($sz -le 100MB) { Write-Host "All downloads failed. Check network." -ForegroundColor Red; exit 1 }
             }
         }
@@ -590,9 +617,9 @@ function Invoke-Deploy {
         try {
             $r = Invoke-WebRequest -Uri "http://localhost:8010/health" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
             $h = ($r.Content | ConvertFrom-Json).status
-            Write-Host "  [$i] $h" -ForegroundColor Yellow
             if ($h -eq "ok" -or $h -eq "loading model") { $ok = $true; break }
-        } catch { Write-Host "  [$i] waiting..." -ForegroundColor Gray }
+        } catch {}
+        if ($i % 5 -eq 0) { Write-Host "  loading... ($($i*3)s)" -ForegroundColor Gray }
     }
     if (!$ok) {
         Write-Host "FAILED to start LLM. Log:" -ForegroundColor Red
@@ -612,9 +639,9 @@ function Invoke-Deploy {
         "READY" | Out-File "$W\state_8011.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchOcr) {
-        Write-Host "  [OCR] Starting EasyOCR port 8013..." -ForegroundColor Yellow
+        Write-Host "  [OCR] Starting PaddleOCR-VL-0.9B port 8013..." -ForegroundColor Yellow
         Write-OcrService
-        Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013 "easyocr pillow"
+        Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013 "torch transformers pillow"
         "READY" | Out-File "$W\state_8013.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchEmbed) {
@@ -638,8 +665,7 @@ function Invoke-Deploy {
     Write-Host "  LLM:     http://localhost:8010/v1"      -ForegroundColor Green
     if ($Mode -eq "code") { Write-Host "  [code mode] Kodify-Nano-2B: optimised for code generation, completions, refactoring" -ForegroundColor Cyan }
     if ($launchAsr)   { Write-Host "  ASR:     http://localhost:8011/v1/asr"        -ForegroundColor Cyan }
-    if ($launchOcr)   { Write-Host "  OCR:     http://localhost:8013/v1/ocr  (EasyOCR ru+en)" -ForegroundColor Cyan }
-    if ($launchEmbed) { Write-Host "  Embed:   http://localhost:8014/v1/embeddings" -ForegroundColor Cyan }
+    if ($launchOcr)   { Write-Host "  OCR:     http://localhost:8013/v1/ocr  (PaddleOCR-VL 0.9B)" -ForegroundColor Cyan }    if ($launchEmbed) { Write-Host "  Embed:   http://localhost:8014/v1/embeddings" -ForegroundColor Cyan }
     Write-Host ""
     Write-Host "  Idle timeouts: LLM=$($IDLE_LLM)s  ASR=$($IDLE_ASR)s  OCR=$($IDLE_OCR)s  Embed=$($IDLE_EMBED)s" -ForegroundColor Gray
     Write-Host "  Stop:    powershell -EP Bypass -File win_deploy.ps1 --stop"   -ForegroundColor Gray
