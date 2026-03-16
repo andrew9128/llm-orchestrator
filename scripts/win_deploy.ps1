@@ -283,6 +283,8 @@ function Write-OcrService {
         "_mdl = [None]; _prc = [None]; ready = [False]; err_msg = [None]",
         "def _patch_cache():",
         "    import transformers.cache_utils as _cu",
+        "    import transformers.utils.generic as _ug",
+        "    # Patch missing cache classes (added in transformers 4.44+)",
         "    for _name in ('SlidingWindowCache','StaticCache','OffloadedStaticCache','QuantizedCache',",
         "                  'QuantizedCacheConfig','OffloadedCache','EncoderDecoderCache'):",
         "        if not hasattr(_cu, _name):",
@@ -292,6 +294,11 @@ function Write-OcrService {
         "                  'QuantizedCacheConfig','OffloadedCache','EncoderDecoderCache'):",
         "        if not hasattr(transformers, _name):",
         "            setattr(transformers, _name, getattr(_cu, _name))",
+        "    # Patch missing utils (added in transformers 4.52+)",
+        "    if not hasattr(_ug, 'check_model_inputs'):",
+        "        def _check_model_inputs(*a, **k): pass",
+        "        _ug.check_model_inputs = _check_model_inputs",
+        "        transformers.utils.check_model_inputs = _check_model_inputs",
         "def load_model():",
         "    try:",
         "        _patch_cache()",
@@ -434,33 +441,19 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
         }
     }
     $errLog = $logPath -replace "\.log$", "_err.log"
+    Remove-Item $errLog -ErrorAction SilentlyContinue
     Start-Process "python" -ArgumentList $scriptPath -WindowStyle Hidden `
         -RedirectStandardOutput $logPath -RedirectStandardError $errLog
-    # HTTP server starts immediately; model loads in background thread
-    # "loading" = alive, "ok" = ready. Wait up to 8 min (first run downloads weights)
-    $maxWait = 240   # 240 × 2s = 8 min
-    for ($i = 1; $i -le $maxWait; $i++) {
-        Start-Sleep -s 2
-        try {
-            $r = Invoke-WebRequest -Uri "http://localhost:$port/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
-            $h = ($r.Content | ConvertFrom-Json).status
-            if ($h -eq "ok") { return }
-            if ($i -eq 3) { Write-Host "    (server up, loading model...)" -ForegroundColor Gray }
-        } catch {
-            if ($i -eq 10) { Write-Host "    (waiting for server start...)" -ForegroundColor Gray }
-        }
-        # Early crash detection at 20s
-        if ($i -eq 10) {
-            $tail = Get-Content $errLog -Tail 5 -ErrorAction SilentlyContinue
-            if ($tail -match "Traceback|ImportError|ModuleNotFoundError") {
-                Write-Host "  CRASH: $errLog" -ForegroundColor Red
-                $tail | Select-Object -Last 3 | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
-                return
-            }
-        }
-        if ($i % 60 -eq 0) { Write-Host "    still loading... ($($i*2)s)" -ForegroundColor Gray }
+    # Non-blocking: watchdog handles health monitoring.
+    # Wait just 5s to catch instant startup crashes (ImportError etc)
+    Start-Sleep -s 5
+    $tail = Get-Content $errLog -Tail 8 -ErrorAction SilentlyContinue
+    if ($tail -match "Traceback|ImportError|ModuleNotFoundError|LOAD_ERROR") {
+        Write-Host "  ERROR on port $port`:" -ForegroundColor Red
+        $tail | ForEach-Object { if ($_ -match "\S") { Write-Host "    $_" -ForegroundColor Red } }
+    } else {
+        Write-Host "  port $port started (model loading in background)" -ForegroundColor Green
     }
-    Write-Host "  WARNING: port $port not ready in 8 min, check: $errLog" -ForegroundColor Yellow
 }
 
 # =============================================================================

@@ -1,3 +1,4 @@
+# LLM WATCHDOG v14.2
 # On-demand lifecycle for all services (LLM, ASR, OCR, Embedding)
 # Key fix: wake-proxy listens on STOPPED ports, catches requests, creates trigger
 # Flow: READY -> idle -> STOPPED -> wake-proxy on port -> trigger -> LOADING -> READY
@@ -324,9 +325,12 @@ while ($true) {
         # ── READY: health check + idle detection ──
         $h = Test-Port $port
 
-        if ($h -eq "ok" -or $h -eq "loading model") {
-            if (!$wasUp[$port]) { Log "[$port] $name UP" }
-            $wasUp[$port]    = $true
+        if ($h -eq "ok" -or $h -eq "loading model" -or $h -eq "loading") {
+            if (!$wasUp[$port]) {
+                if ($h -eq "ok") { Log "[$port] $name UP" }
+                # "loading" = model still loading, don't log every cycle
+            }
+            if ($h -eq "ok") { $wasUp[$port] = $true }
             $failCount[$port] = 0
             $lastSeen[$port] = (Get-Date)
 
@@ -342,22 +346,27 @@ while ($true) {
                     Start-WakeProxy 8010 "LLM"
                 }
             }
-            # Idle for special services: they self-exit via os._exit(0),
-            # watchdog detects death in the next section
             continue
         }
 
         # ── Health failed ──
         $failCount[$port]++
-        Log "[$port] $name health=$h fail#$($failCount[$port])"
 
-        # Special services die on idle by design (os._exit) → mark STOPPED, start wake proxy
+        # Special services: only log and kill after 3 consecutive failures
+        # (avoids false STOPPED during slow model loading or brief hiccup)
         if ($port -ne 8010) {
-            if ($wasUp[$port] -or $failCount[$port] -ge 2) {
+            if ($failCount[$port] -ge 3 -and $wasUp[$port]) {
                 Log "[$port] $name stopped (idle or crash) → STOPPED"
                 $state[$port]    = "STOPPED"
                 $failCount[$port] = 0
                 $wasUp[$port]    = $false
+                Set-State $port "STOPPED"
+                Start-WakeProxy $port $name
+            } elseif ($failCount[$port] -ge 5) {
+                # Never came up at all after 5 tries (~50s) — give up waiting
+                Log "[$port] $name never became healthy → STOPPED"
+                $state[$port]    = "STOPPED"
+                $failCount[$port] = 0
                 Set-State $port "STOPPED"
                 Start-WakeProxy $port $name
             }
