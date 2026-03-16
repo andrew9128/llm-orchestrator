@@ -72,7 +72,7 @@ function Invoke-Status {
     $portMap = @{
         8010 = "LLM (llama-server)"
         8011 = "ASR (GigaAM)"
-        8013 = "OCR (PaddleOCR-VL)"
+        8013 = "OCR (surya-ocr)"
         8014 = "Embedding (RoSBERTa)"
     }
     foreach ($port in 8010, 8011, 8013, 8014) {
@@ -270,9 +270,9 @@ function Write-AsrService {
 }
 
 function Write-OcrService {
-    # PaddleOCR-VL 0.9B via HuggingFace transformers
-    # HTTP starts immediately; model loads in background thread
-    # Monkey-patches SlidingWindowCache so model loads on any transformers version
+    # surya-ocr: pure PyTorch, no custom model code, excellent Russian
+    # pip install surya-ocr  (~500 MB models auto-download on first use)
+    # Supports: printed + handwritten text, tables, mixed RU/EN docs
     $lines = @(
         "import json, base64, tempfile, os, sys, time, threading, warnings",
         "from http.server import HTTPServer, BaseHTTPRequestHandler",
@@ -280,51 +280,29 @@ function Write-OcrService {
         "os.environ['TOKENIZERS_PARALLELISM'] = 'false'",
         "IDLE_TIMEOUT = $IDLE_OCR",
         "last_req = [time.time()]",
-        "_mdl = [None]; _prc = [None]; ready = [False]; err_msg = [None]",
-        "def _patch_cache():",
-        "    import transformers.cache_utils as _cu",
-        "    import transformers.utils.generic as _ug",
-        "    # Patch missing cache classes (added in transformers 4.44+)",
-        "    for _name in ('SlidingWindowCache','StaticCache','OffloadedStaticCache','QuantizedCache',",
-        "                  'QuantizedCacheConfig','OffloadedCache','EncoderDecoderCache'):",
-        "        if not hasattr(_cu, _name):",
-        "            setattr(_cu, _name, type(_name, (), {'__init__': lambda s,*a,**k: None}))",
-        "    import transformers",
-        "    for _name in ('SlidingWindowCache','StaticCache','OffloadedStaticCache','QuantizedCache',",
-        "                  'QuantizedCacheConfig','OffloadedCache','EncoderDecoderCache'):",
-        "        if not hasattr(transformers, _name):",
-        "            setattr(transformers, _name, getattr(_cu, _name))",
-        "    # Patch missing utils (added in transformers 4.52+)",
-        "    if not hasattr(_ug, 'check_model_inputs'):",
-        "        def _check_model_inputs(*a, **k): pass",
-        "        _ug.check_model_inputs = _check_model_inputs",
-        "        transformers.utils.check_model_inputs = _check_model_inputs",
+        "_ocr = [None]; ready = [False]; err_msg = [None]",
         "def load_model():",
         "    try:",
-        "        _patch_cache()",
-        "        import torch",
-        "        from transformers import AutoModelForCausalLM, AutoProcessor",
-        "        dev = 'cuda' if torch.cuda.is_available() else 'cpu'",
-        "        _prc[0] = AutoProcessor.from_pretrained('PaddlePaddle/PaddleOCR-VL', trust_remote_code=True)",
-        "        _mdl[0] = AutoModelForCausalLM.from_pretrained(",
-        "            'PaddlePaddle/PaddleOCR-VL', trust_remote_code=True,",
-        "            dtype=torch.bfloat16).to(dev).eval()",
+        "        from surya.ocr import run_ocr as _run",
+        "        from surya.model.detection.model import load_model as load_det, load_processor as load_det_proc",
+        "        from surya.model.recognition.model import load_model as load_rec",
+        "        from surya.model.recognition.processor import load_processor as load_rec_proc",
+        "        det_m   = load_det()",
+        "        det_p   = load_det_proc()",
+        "        rec_m   = load_rec()",
+        "        rec_p   = load_rec_proc()",
+        "        _ocr[0] = (_run, det_m, det_p, rec_m, rec_p)",
         "        ready[0] = True",
         "    except Exception as e:",
         "        err_msg[0] = str(e)",
         "        print(f'LOAD_ERROR: {e}', file=sys.stderr, flush=True)",
-        "def run_ocr(path):",
-        "    import torch",
+        "def do_ocr(image_path):",
         "    from PIL import Image",
-        "    dev = 'cuda' if torch.cuda.is_available() else 'cpu'",
-        "    img  = Image.open(path).convert('RGB')",
-        "    msgs = [{'role':'user','content':'OCR:'}]",
-        "    txt  = _prc[0].apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)",
-        "    inp  = _prc[0](text=[txt], images=[img], return_tensors='pt')",
-        "    inp  = {k: v.to(dev) for k, v in inp.items() if hasattr(v,'to')}",
-        "    with torch.inference_mode():",
-        "        ids = _mdl[0].generate(**inp, max_new_tokens=2048, do_sample=False)",
-        "    return _prc[0].batch_decode(ids, skip_special_tokens=True)[0].strip()",
+        "    _run, det_m, det_p, rec_m, rec_p = _ocr[0]",
+        "    img  = Image.open(image_path).convert('RGB')",
+        "    res  = _run([img], [['ru', 'en']], det_m, det_p, rec_m, rec_p)",
+        "    lines = [line.text for page in res for line in page.text_lines if line.text.strip()]",
+        "    return chr(10).join(lines)",
         "class H(BaseHTTPRequestHandler):",
         "    def log_message(self, f, *a): pass",
         "    def do_GET(self):",
@@ -345,7 +323,7 @@ function Write-OcrService {
         "        ext  = body.get('ext', '.png')",
         "        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:",
         "            f.write(img); tmp = f.name",
-        "        try:    text = run_ocr(tmp)",
+        "        try:    text = do_ocr(tmp)",
         "        except Exception as e: text = 'ERROR: ' + str(e)",
         "        finally: os.unlink(tmp)",
         "        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
@@ -681,7 +659,7 @@ function Invoke-Deploy {
         "READY" | Out-File "$W\state_8011.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchOcr) {
-        Write-Host "  [OCR] Starting PaddleOCR-VL-0.9B port 8013..." -ForegroundColor Yellow
+        Write-Host "  [OCR] Starting surya-ocr port 8013..." -ForegroundColor Yellow
         # Clear cached model code — forces reload with updated transformers
         $hfModCache = "$env:USERPROFILE\.cache\huggingface\modules\transformers_modules\PaddlePaddle"
         if (Test-Path $hfModCache) {
@@ -689,7 +667,7 @@ function Invoke-Deploy {
         }
         Write-OcrService
         & python -m pip install --quiet --upgrade "transformers>=4.47" 2>&1 | Out-Null
-        Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013 "torch torchvision einops pillow"
+        Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013 "surya-ocr"
         "READY" | Out-File "$W\state_8013.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchEmbed) {
@@ -713,7 +691,7 @@ function Invoke-Deploy {
     Write-Host "  LLM:     http://localhost:8010/v1"      -ForegroundColor Green
     if ($Mode -eq "code") { Write-Host "  [code mode] Kodify-Nano-2B: optimised for code generation, completions, refactoring" -ForegroundColor Cyan }
     if ($launchAsr)   { Write-Host "  ASR:     http://localhost:8011/v1/asr"        -ForegroundColor Cyan }
-    if ($launchOcr)   { Write-Host "  OCR:     http://localhost:8013/v1/ocr  (PaddleOCR-VL 0.9B)" -ForegroundColor Cyan }    if ($launchEmbed) { Write-Host "  Embed:   http://localhost:8014/v1/embeddings" -ForegroundColor Cyan }
+    if ($launchOcr)   { Write-Host "  OCR:     http://localhost:8013/v1/ocr  (surya-ocr ru+en)" -ForegroundColor Cyan }    if ($launchEmbed) { Write-Host "  Embed:   http://localhost:8014/v1/embeddings" -ForegroundColor Cyan }
     Write-Host ""
     Write-Host "  Idle timeouts: LLM=$($IDLE_LLM)s  ASR=$($IDLE_ASR)s  OCR=$($IDLE_OCR)s  Embed=$($IDLE_EMBED)s" -ForegroundColor Gray
     Write-Host "  Stop:    powershell -EP Bypass -File win_deploy.ps1 --stop"   -ForegroundColor Gray
