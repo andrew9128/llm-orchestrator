@@ -411,21 +411,25 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
     $pyOk = $false
     try { $null = & python --version 2>&1; $pyOk = ($LASTEXITCODE -eq 0) } catch {}
     if (!$pyOk) { Write-Host "  Python not found, skipping port $port" -ForegroundColor Red; return }
+    
     if ($packages) {
         foreach ($pkg in $packages.Split(" ")) {
-            $res = & python -m pip install --quiet $pkg 2>&1
-            $err = $res | Where-Object { $_ -match "^ERROR|Could not find|No matching" }
-            if ($err) { Write-Host "  pip [$pkg] FAILED: $($err[0])" -ForegroundColor Red }
+            Write-Host "  Installing package: $pkg..." -ForegroundColor Gray
+            $res = & python -m pip install --user $pkg 2>&1
+            if ($LASTEXITCODE -ne 0) { 
+                Write-Host "  FAILED to install $pkg. Service might fail." -ForegroundColor Red 
+            }
         }
     }
+    
     $errLog = $logPath -replace "\.log$", "_err.log"
     Remove-Item $errLog -ErrorAction SilentlyContinue
+    
     Start-Process "python" -ArgumentList $scriptPath -WindowStyle Hidden `
         -RedirectStandardOutput $logPath -RedirectStandardError $errLog
-    # Non-blocking: watchdog handles health monitoring.
-    # Wait just 5s to catch instant startup crashes (ImportError etc)
-    Start-Sleep -s 5
-    $tail = Get-Content $errLog -Tail 8 -ErrorAction SilentlyContinue
+    
+    Start-Sleep -s 10
+    $tail = Get-Content $errLog -Tail 15 -ErrorAction SilentlyContinue
     if ($tail -match "Traceback|ImportError|ModuleNotFoundError|LOAD_ERROR") {
         Write-Host "  ERROR on port $port`:" -ForegroundColor Red
         $tail | ForEach-Object { if ($_ -match "\S") { Write-Host "    $_" -ForegroundColor Red } }
