@@ -410,31 +410,28 @@ function Write-EmbedService {
 function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
     $pyOk = $false
     try { $null = & python --version 2>&1; $pyOk = ($LASTEXITCODE -eq 0) } catch {}
-    if (!$pyOk) { Write-Host "  Python not found, skipping port $port" -ForegroundColor Red; return }
+    if (!$pyOk) { Write-Host "  Python not found!" -ForegroundColor Red; return }
+    
+    $errLog = $logPath -replace "\.log$", "_err.log"
     
     if ($packages) {
         foreach ($pkg in $packages.Split(" ")) {
-            Write-Host "  Installing package: $pkg..." -ForegroundColor Gray
-            $res = & python -m pip install --user $pkg 2>&1
-            if ($LASTEXITCODE -ne 0) { 
-                Write-Host "  FAILED to install $pkg. Service might fail." -ForegroundColor Red 
-            }
+            Write-Host "  Checking/Installing $pkg..." -ForegroundColor Gray
+            # Записываем результат установки в лог ошибок, чтобы мы могли его прочитать
+            & python -m pip install $pkg --no-cache-dir 2>> $errLog | Out-Null
         }
     }
-    
-    $errLog = $logPath -replace "\.log$", "_err.log"
-    Remove-Item $errLog -ErrorAction SilentlyContinue
     
     Start-Process "python" -ArgumentList $scriptPath -WindowStyle Hidden `
         -RedirectStandardOutput $logPath -RedirectStandardError $errLog
     
-    Start-Sleep -s 10
-    $tail = Get-Content $errLog -Tail 15 -ErrorAction SilentlyContinue
+    # Даем модели время на инициализацию
+    Start-Sleep -s 8
+    $tail = Get-Content $errLog -Tail 20 -ErrorAction SilentlyContinue
     if ($tail -match "Traceback|ImportError|ModuleNotFoundError|LOAD_ERROR") {
-        Write-Host "  ERROR on port $port`:" -ForegroundColor Red
-        $tail | ForEach-Object { if ($_ -match "\S") { Write-Host "    $_" -ForegroundColor Red } }
+        Write-Host "  ERROR on port $port. Check log: cat $errLog" -ForegroundColor Red
     } else {
-        Write-Host "  port $port started (model loading in background)" -ForegroundColor Green
+        Write-Host "  port $port started" -ForegroundColor Green
     }
 }
 
