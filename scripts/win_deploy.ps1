@@ -244,9 +244,8 @@ function Write-AsrService {
 }
 
 function Write-OcrService {
-    # surya-ocr: pure PyTorch, excellent Russian, no custom model code
-    # Tries surya >= 0.7 API (RecognitionPredictor/DetectionPredictor) first,
-    # falls back to surya 0.5/0.6 legacy (run_ocr + load_model functions)
+    # surya-ocr 0.4-0.6: pure PyTorch, excellent Russian
+    # Pin to <0.7 since 0.7+ removed surya.ocr module
     $lines = @(
         "import sys, json, base64, tempfile, os, time, threading, warnings",
         "from http.server import HTTPServer, BaseHTTPRequestHandler",
@@ -259,26 +258,13 @@ function Write-OcrService {
         "",
         "def load_model():",
         "    try:",
-        "        # surya >= 0.7 predictor API",
-        "        try:",
-        "            from surya.recognition import RecognitionPredictor",
-        "            from surya.detection import DetectionPredictor",
-        "            det = DetectionPredictor()",
-        "            rec = RecognitionPredictor()",
-        "            _state[0] = ('new', det, rec)",
-        "            ready[0] = True",
-        "            print('surya: loaded new API (>=0.7)', flush=True)",
-        "            return",
-        "        except (ImportError, AttributeError, Exception) as _e1:",
-        "            print(f'surya new API failed: {_e1}, trying legacy...', file=sys.stderr)",
-        "        # surya 0.5/0.6 legacy API",
         "        from surya.ocr import run_ocr as _run",
         "        from surya.model.detection.model import load_model as ld, load_processor as ldp",
         "        from surya.model.recognition.model import load_model as lr",
         "        from surya.model.recognition.processor import load_processor as lrp",
-        "        _state[0] = ('legacy', _run, ld(), ldp(), lr(), lrp())",
+        "        _state[0] = (_run, ld(), ldp(), lr(), lrp())",
         "        ready[0] = True",
-        "        print('surya: loaded legacy API', flush=True)",
+        "        print('surya-ocr: loaded OK', flush=True)",
         "    except Exception as e:",
         "        err_msg[0] = str(e)",
         "        print(f'LOAD_ERROR: {e}', file=sys.stderr, flush=True)",
@@ -286,16 +272,9 @@ function Write-OcrService {
         "def do_ocr(image_path):",
         "    from PIL import Image",
         "    img = Image.open(image_path).convert('RGB')",
-        "    api = _state[0][0]",
-        "    if api == 'new':",
-        "        _, det, rec = _state[0]",
-        "        det_preds = det([img])",
-        "        rec_preds = rec([img], [['ru', 'en']], det_preds)",
-        "        lines = [l.text for page in rec_preds for l in page.text_lines if l.text.strip()]",
-        "    else:",
-        "        _, _run, det_m, det_p, rec_m, rec_p = _state[0]",
-        "        res = _run([img], [['ru', 'en']], det_m, det_p, rec_m, rec_p)",
-        "        lines = [l.text for page in res for l in page.text_lines if l.text.strip()]",
+        "    _run, det_m, det_p, rec_m, rec_p = _state[0]",
+        "    res = _run([img], [['ru', 'en']], det_m, det_p, rec_m, rec_p)",
+        "    lines = [l.text for page in res for l in page.text_lines if l.text.strip()]",
         "    return chr(10).join(lines)",
         "",
         "class H(BaseHTTPRequestHandler):",
@@ -356,15 +335,11 @@ function Write-EmbedService {
         "def load_model():",
         "    try:",
         "        import torch",
-        "        from transformers import AutoTokenizer, AutoModel",
+        "        from transformers import AutoTokenizer, RobertaModel",
         "        mid = 'ai-forever/ru-en-RoSBERTa'",
-        "        try:",
-        "            _tok[0] = AutoTokenizer.from_pretrained(mid, local_files_only=True)",
-        "            _mdl[0] = AutoModel.from_pretrained(mid, local_files_only=True,",
-        "                          ignore_mismatched_sizes=True)",
-        "        except Exception:",
-        "            _tok[0] = AutoTokenizer.from_pretrained(mid)",
-        "            _mdl[0] = AutoModel.from_pretrained(mid, ignore_mismatched_sizes=True)",
+        "        _tok[0] = AutoTokenizer.from_pretrained(mid)",
+        "        # RobertaModel directly — avoids AutoModel pickle/class-registry errors",
+        "        _mdl[0] = RobertaModel.from_pretrained(mid, add_pooling_layer=False)",
         "        _mdl[0].eval()",
         "        ready[0] = True",
         "        print('embed: model loaded OK', flush=True)",
@@ -572,9 +547,9 @@ function Invoke-Deploy {
 
     if ($launchOcr) {
         Write-Host "  [OCR] Starting surya-ocr port 8013..." -ForegroundColor Yellow
-        # Upgrade surya to latest — API compatibility with current torch
-        Write-Host "  Installing/upgrading surya-ocr..." -ForegroundColor Gray
-        & python -m pip install --upgrade surya-ocr 2>&1 | Where-Object { $_ -match "Successfully|Collecting|ERROR" } | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        # Pin surya<0.7 — 0.7+ removed surya.ocr module entirely
+        Write-Host "  Installing surya-ocr (0.6.x)..." -ForegroundColor Gray
+        & python -m pip install "surya-ocr>=0.4,<0.7" 2>&1 | Where-Object { $_ -match "Successfully|Collecting|ERROR|already" } | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
         Write-OcrService
         Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013
         "READY" | Out-File "$W\state_8013.txt" -Encoding UTF8 -NoNewline
