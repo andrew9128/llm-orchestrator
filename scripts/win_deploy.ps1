@@ -1,4 +1,4 @@
-# LLM WIN DEPLOY v14.2-fix2
+# LLM WIN DEPLOY v14.2-fix3
 # On-demand model lifecycle: STOPPED -> LOADING -> READY -> IDLE -> STOPPED
 # All services (LLM, ASR, OCR, Embedding) start on request, unload on idle_timeout
 #
@@ -6,7 +6,8 @@
 #   [fix1] Write-OcrService: surya 0.6.x predictor API (DetectionPredictor/RecognitionPredictor)
 #   [fix2] Write-EmbedService: trust_remote_code=True for ai-forever/ru-en-RoSBERTa
 #   [fix3] Start-SpecialService: proper torch version compare (handles 2.10+, strips +cu124 suffix)
-#   [fix4] LLM health-check timeout 240s→600s (RTX 5060 Blackwell CC 12.0 compiles CUDA kernels on 1st run)
+#   [fix4] LLM health-check: reads HTTP 503 body (loading model), no hard timeout, bails on process death
+#   [fix5] Invoke-Stop: kills any process holding ports 8010-8014 (wake proxy, stale listeners)
 #
 # Usage:
 #   win_deploy.ps1                        -- deploy chat mode (default)
@@ -42,31 +43,51 @@ $IDLE_EMBED = 900   # 15 min
 function Invoke-Stop {
     Write-Host "Stopping all LLM services..." -ForegroundColor Yellow
     $killed = 0
+
+    # Kill llama processes
     Get-Process | Where-Object { $_.Name -match "llama" } | ForEach-Object {
         Stop-Process $_ -Force -ErrorAction SilentlyContinue
         $killed++
     }
     Write-Host "  Stopped $killed llama process(es)" -ForegroundColor Green
+
+    # Kill known PowerShell service processes (watchdog, wake proxy, service wrappers)
     Get-WmiObject Win32_Process | Where-Object {
         $_.Name -eq "powershell.exe" -and (
-            $_.CommandLine -match "watchdog" -or
-            $_.CommandLine -match "asr_service" -or
-            $_.CommandLine -match "ocr_service" -or
-            $_.CommandLine -match "embed_service"
+            $_.CommandLine -match "watchdog|wake_proxy|asr_service|ocr_service|embed_service|llm_native"
         )
     } | ForEach-Object {
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-        Write-Host "  Stopped PS service PID $($_.ProcessId)" -ForegroundColor Green
+        Write-Host "  Stopped PS process PID $($_.ProcessId)" -ForegroundColor Green
     }
+
+    # Kill Python service processes
     Get-WmiObject Win32_Process | Where-Object {
         $_.Name -match "python" -and (
-            $_.CommandLine -match "asr_service|ocr_service|embed_service"
+            $_.CommandLine -match "asr_service|ocr_service|embed_service|wake_proxy"
         )
     } | ForEach-Object {
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
         Write-Host "  Stopped Python service PID $($_.ProcessId)" -ForegroundColor Green
     }
+
+    # Kill anything holding our service ports (8010-8014) - catches wake proxies and leftovers
+    foreach ($port in 8010, 8011, 8013, 8014) {
+        try {
+            $conn = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
+                    Where-Object { $_.State -eq "Listen" } | Select-Object -First 1
+            if ($conn -and $conn.OwningProcess -gt 4) {
+                $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
+                if ($proc) {
+                    Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
+                    Write-Host "  Freed port $port (was held by $($proc.Name) PID $($conn.OwningProcess))" -ForegroundColor Green
+                }
+            }
+        } catch {}
+    }
+
     Remove-Item "$W\*.trigger" -ErrorAction SilentlyContinue
+    Start-Sleep -s 2
     Write-Host "Done." -ForegroundColor Green
 }
 
@@ -436,7 +457,7 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM AUTO-DEPLOY v14.2-fix2 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM AUTO-DEPLOY v14.2-fix3 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
     Write-Host "    On-demand: services start on request, auto-unload on idle" -ForegroundColor Gray
 
     Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -625,23 +646,60 @@ function Invoke-Deploy {
 
     Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\run.ps1"
 
-    # RTX 5060 (Blackwell CC 12.0) compiles CUDA kernels on first run — allow up to 10 min
+    # Wait for LLM to become healthy.
+    # No hard timeout — bail only if the llama-server process dies.
+    # llama.cpp returns HTTP 503 {"status":"loading model"} while loading,
+    # then HTTP 200 {"status":"ok"} when ready. Both must be handled correctly
+    # because Invoke-WebRequest -ErrorAction Stop throws on 503, discarding the body.
     $ok = $false
-    for ($i = 1; $i -le 200; $i++) {
-        Start-Sleep -s 3
+    $elapsed = 0
+    $lastMsg = ""
+    while ($true) {
+        Start-Sleep -s 5
+        $elapsed += 5
+
+        # Try to read /health, including the body on non-200 responses
+        $healthStatus = ""
         try {
-            $r = Invoke-WebRequest -Uri "http://localhost:8010/health" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
-            $h = ($r.Content | ConvertFrom-Json).status
-            if ($h -eq "ok" -or $h -eq "loading model") { $ok = $true; break }
+            $req = [System.Net.HttpWebRequest]::Create("http://localhost:8010/health")
+            $req.Timeout = 8000
+            $req.Method = "GET"
+            try {
+                $resp = $req.GetResponse()
+                $body = [System.IO.StreamReader]::new($resp.GetResponseStream()).ReadToEnd()
+                $resp.Close()
+                $healthStatus = ($body | ConvertFrom-Json -ErrorAction SilentlyContinue).status
+            } catch [System.Net.WebException] {
+                $webResp = $_.Exception.Response
+                if ($webResp -ne $null) {
+                    $body = [System.IO.StreamReader]::new($webResp.GetResponseStream()).ReadToEnd()
+                    $healthStatus = ($body | ConvertFrom-Json -ErrorAction SilentlyContinue).status
+                }
+                # connection refused / no response = healthStatus stays ""
+            }
         } catch {}
-        if ($i % 10 -eq 0) { Write-Host "  loading... ($($i*3)s / 600s max)" -ForegroundColor Gray }
+
+        if ($healthStatus -eq "ok") { $ok = $true; break }
+
+        # Bail if process died
+        $alive = [bool](Get-Process -Name "llama-server" -ErrorAction SilentlyContinue)
+        if (-not $alive) {
+            Write-Host "  llama-server process not found — crashed?" -ForegroundColor Red
+            break
+        }
+
+        # Progress every 30s, show actual status
+        if ($elapsed % 30 -eq 0) {
+            $msg = if ($healthStatus) { $healthStatus } else { "no response yet" }
+            Write-Host "  loading... (${elapsed}s, status: $msg)" -ForegroundColor Gray
+        }
     }
     if (!$ok) {
-        Write-Host "FAILED to start LLM after 600s. Log:" -ForegroundColor Red
+        Write-Host "FAILED to start LLM. Log:" -ForegroundColor Red
         if (Test-Path "$W\server.log") { Get-Content "$W\server.log" -Tail 30 }
         exit 1
     }
-    Write-Host "  LLM ready." -ForegroundColor Green
+    Write-Host "  LLM ready (${elapsed}s)." -ForegroundColor Green
     "READY" | Out-File "$W\state_8010.txt" -Encoding UTF8 -NoNewline
 
     $launchAsr   = $Mode -in @("voice","full")
@@ -677,7 +735,7 @@ function Invoke-Deploy {
     Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-ExecutionPolicy", "Bypass", "-File", $wdScript
 
     Write-Host ""
-    Write-Host "SUCCESS - LLM Orchestrator v14.2-fix2" -ForegroundColor Green
+    Write-Host "SUCCESS - LLM Orchestrator v14.2-fix3" -ForegroundColor Green
     Write-Host "  Mode:    $Mode"                         -ForegroundColor Green
     Write-Host "  Model:   $($candidate.name)"            -ForegroundColor Green
     Write-Host "  GPUs:    $deviceList ($totalVram MiB)"  -ForegroundColor Green
