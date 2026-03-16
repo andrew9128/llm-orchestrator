@@ -406,14 +406,20 @@ function Write-EmbedService {
 function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
     $pyOk = $false
     try { $null = & python --version 2>&1; $pyOk = ($LASTEXITCODE -eq 0) } catch {}
-    if (!$pyOk) { Write-Host "  Python not found!" -ForegroundColor Red; return }
+    if (!$pyOk) { return }
     
     $errLog = $logPath -replace "\.log$", "_err.log"
     
+    if ($packages -match "surya-ocr") {
+        Write-Host "  Checking Surya-OCR requirements (Torch >= 2.7.0)..." -ForegroundColor Gray
+        $currentTorch = & python -c "import torch; print(torch.__version__)" 2>$null
+        if ($currentTorch -notmatch "^2\.[7-9]" -and $currentTorch -notmatch "^[3-9]\.") {
+            Write-Host "  Torch version $currentTorch is too old. Upgrading..." -ForegroundColor Yellow
+            & python -m pip install --quiet torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --upgrade --no-cache-dir
+        }
+    }
+
     if ($packages) {
-        Write-Host "  Aligning dependencies for $port (Torch 2.7.1+cu124)..." -ForegroundColor Gray
-        & python -m pip install --quiet --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --no-cache-dir
-        
         foreach ($pkg in $packages.Split(" ")) {
             Write-Host "  Installing $pkg..." -ForegroundColor Gray
             & python -m pip install --quiet --prefer-binary $pkg 2>> $errLog | Out-Null
@@ -424,12 +430,6 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
         -RedirectStandardOutput $logPath -RedirectStandardError $errLog
     
     Start-Sleep -s 10
-    $tail = Get-Content $errLog -Tail 20 -ErrorAction SilentlyContinue
-    if ($tail -match "Traceback|ImportError|ModuleNotFoundError|LOAD_ERROR|OSError") {
-        Write-Host "  ERROR on port $port. Check log: cat $errLog" -ForegroundColor Red
-    } else {
-        Write-Host "  port $port started" -ForegroundColor Green
-    }
 }
 
 # =============================================================================
