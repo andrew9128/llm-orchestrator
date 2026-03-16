@@ -132,38 +132,17 @@ function Install-Pkg($pkgId, $label) {
 
 function Download-Model($url, $dest) {
     Remove-Item $dest -ErrorAction SilentlyContinue
-    $hfRepo = ""; $hfFile = ""
-    if ($url -match "huggingface\.co/([^/]+/[^/]+)/resolve/[^/]+/(.+)") {
-        $hfRepo = $Matches[1]; $hfFile = $Matches[2]
+    # HF requires ?download=true for direct file serving (browser does this automatically)
+    $dlUrl = if ($url -notmatch "\?") { "$url`?download=true" } else { $url }
+    Write-Host "  curl: $($url.Split('/')[-1])" -ForegroundColor Gray
+    curl.exe -L --retry 3 --retry-delay 3 --retry-connrefused `
+        -H "User-Agent: Mozilla/5.0" `
+        $dlUrl -o $dest
+    if ((Test-Path $dest) -and (Get-Item $dest).Length -gt 1MB) {
+        return (Get-Item $dest).Length
     }
-    if ($hfRepo) {
-        $dlDir = Split-Path $dest -Parent
-        $pyCode = @"
-import sys
-try:
-    from huggingface_hub import hf_hub_download
-    import shutil, os
-    p = hf_hub_download(repo_id='$hfRepo', filename='$hfFile',
-        local_dir=r'$dlDir', local_dir_use_symlinks=False, resume_download=True)
-    p = os.path.abspath(p); d = os.path.abspath(r'$dest')
-    if p != d: shutil.move(p, d)
-    print(f'hf-ok:{os.path.getsize(d)}')
-except Exception as e:
-    print(f'hf-err:{e}', file=sys.stderr)
-"@
-        $out = & python -c $pyCode 2>&1
-        $ok  = $out | Where-Object { $_ -match "^hf-ok:" }
-        $err = $out | Where-Object { $_ -match "^hf-err:" }
-        if ($err) { Write-Host "  hf-hub: $($err -replace 'hf-err:','')" -ForegroundColor Yellow }
-    }
-    # curl fallback: --location follows redirects, --header skips LFS pointer redirect
-    if (!(Test-Path $dest) -or (Get-Item $dest -EA SilentlyContinue).Length -lt 1MB) {
-        curl.exe -L --retry 3 --retry-delay 2 `
-            -H "User-Agent: Mozilla/5.0" `
-            -H "Accept: application/octet-stream" `
-            $url -o $dest 2>&1 | Out-Null
-    }
-    if (Test-Path $dest) { return (Get-Item $dest).Length }
+    # If dest exists but tiny → bad download, remove
+    Remove-Item $dest -ErrorAction SilentlyContinue
     return 0
 }
 
@@ -206,7 +185,7 @@ function Select-BestModel($vramMb, $deployMode) {
         # t-lite 8B + yagpt 8B + qvikhr 8B (q8 on 10 GB)
         [PSCustomObject]@{ name="t-lite-8b-q8";  file="t-lite-8b-q8.gguf";  minVram=10000; url="https://huggingface.co/t-tech/T-lite-it-1.0-GGUF/resolve/main/T-lite-it-1.0-Q8_0.gguf" }
         [PSCustomObject]@{ name="yagpt-8b-q8";   file="yagpt-8b-q8.gguf";   minVram=10000; url="https://huggingface.co/yandex/YandexGPT-5-Lite-8B-GGUF/resolve/main/YandexGPT-5-Lite-8B-instruct-Q8_0.gguf" }
-        [PSCustomObject]@{ name="qvikhr-8b-q8";  file="qvikhr-8b-q8.gguf";  minVram=10000; url="https://huggingface.co/Vikhrmodels/QVikhr-3-8B-Instruct-GGUF/resolve/main/qvikhr-3-8b-instruct-q8_0.gguf" }
+        [PSCustomObject]@{ name="qvikhr-8b-q8";  file="qvikhr-8b-q8.gguf";  minVram=10000; url="https://huggingface.co/Vikhrmodels/QVikhr-3-8B-Instruction-GGUF/resolve/main/QVikhr-3-8B-Instruction-Q8_0.gguf" }
         # saiga 12B q5 (10 GB)
         [PSCustomObject]@{ name="saiga-nem12-q5"; file="saiga-nem12-q5.gguf"; minVram=9800; url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q5_K_M.gguf" }
         [PSCustomObject]@{ name="saiga-gem12-q5"; file="saiga-gem12-q5.gguf"; minVram=9800; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q5_K_M.gguf" }
@@ -216,22 +195,22 @@ function Select-BestModel($vramMb, $deployMode) {
         [PSCustomObject]@{ name="saiga-nem12-q4"; file="saiga-nem12-q4.gguf"; minVram=8300; url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q4_K_M.gguf" }
         [PSCustomObject]@{ name="saiga-gem12-q4"; file="saiga-gem12-q4.gguf"; minVram=8300; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q4_K_M.gguf" }
         # qvikhr 8B q5 + t-lite q5 (7 GB)
-        [PSCustomObject]@{ name="qvikhr-8b-q5"; file="qvikhr-8b-q5.gguf"; minVram=6800; url="https://huggingface.co/Vikhrmodels/QVikhr-3-8B-Instruct-GGUF/resolve/main/qvikhr-3-8b-instruct-q5_k_m.gguf" }
+        [PSCustomObject]@{ name="qvikhr-8b-q5"; file="qvikhr-8b-q5.gguf"; minVram=6800; url="https://huggingface.co/Vikhrmodels/QVikhr-3-8B-Instruction-GGUF/resolve/main/QVikhr-3-8B-Instruction-Q5_0.gguf" }
         [PSCustomObject]@{ name="t-lite-8b-q5"; file="t-lite-8b-q5.gguf"; minVram=6600; url="https://huggingface.co/t-tech/T-lite-it-1.0-GGUF/resolve/main/T-lite-it-1.0-Q5_K_M.gguf" }
         # saiga mistral 7B q5 (6 GB)
         [PSCustomObject]@{ name="saiga-mis7b-q5"; file="saiga-mis7b-q5.gguf"; minVram=6200; url="https://huggingface.co/IlyaGusev/saiga_mistral_7b_gguf/resolve/main/saiga_mistral_7b.Q5_K_M.gguf" }
         # qvikhr 4B q8 + t-lite q4 + yagpt q4 (5-6 GB)
-        [PSCustomObject]@{ name="qvikhr-4b-q8"; file="qvikhr-4b-q8.gguf"; minVram=5800; url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruct-GGUF/resolve/main/qvikhr-3-4b-instruct-q8_0.gguf" }
+        [PSCustomObject]@{ name="qvikhr-4b-q8"; file="qvikhr-4b-q8.gguf"; minVram=5800; url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q8_0.gguf" }
         [PSCustomObject]@{ name="t-lite-8b-q4"; file="t-lite-8b-q4.gguf"; minVram=5600; url="https://huggingface.co/t-tech/T-lite-it-1.0-GGUF/resolve/main/T-lite-it-1.0-Q4_K_M.gguf" }
         [PSCustomObject]@{ name="yagpt-8b-q4";  file="yagpt-8b-q4.gguf";  minVram=5600; url="https://huggingface.co/yandex/YandexGPT-5-Lite-8B-GGUF/resolve/main/YandexGPT-5-Lite-8B-instruct-Q4_K_M.gguf" }
-        [PSCustomObject]@{ name="qvikhr-8b-q4"; file="qvikhr-8b-q4.gguf"; minVram=5700; url="https://huggingface.co/Vikhrmodels/QVikhr-3-8B-Instruct-GGUF/resolve/main/qvikhr-3-8b-instruct-q4_k_m.gguf" }
+        [PSCustomObject]@{ name="qvikhr-8b-q4"; file="qvikhr-8b-q4.gguf"; minVram=5700; url="https://huggingface.co/Vikhrmodels/QVikhr-3-8B-Instruction-GGUF/resolve/main/QVikhr-3-8B-Instruction-Q4_K_M.gguf" }
         # qvikhr 4B q5/q4 (4-5 GB)
-        [PSCustomObject]@{ name="qvikhr-4b-q5"; file="qvikhr-4b-q5.gguf"; minVram=4300; url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruct-GGUF/resolve/main/qvikhr-3-4b-instruct-q5_k_m.gguf" }
-        [PSCustomObject]@{ name="qvikhr-4b-q4"; file="qvikhr-4b-q4.gguf"; minVram=3800; url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruct-GGUF/resolve/main/qvikhr-3-4b-instruct-q4_k_m.gguf" }
+        [PSCustomObject]@{ name="qvikhr-4b-q5"; file="qvikhr-4b-q5.gguf"; minVram=4300; url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q5_0.gguf" }
+        [PSCustomObject]@{ name="qvikhr-4b-q4"; file="qvikhr-4b-q4.gguf"; minVram=3800; url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q4_K_M.gguf" }
         [PSCustomObject]@{ name="saiga-llama8b-q4"; file="saiga-llama8b-q4.gguf"; minVram=5800; url="https://huggingface.co/IlyaGusev/saiga_llama3_8b_gguf/resolve/main/saiga_llama3_8b.Q4_K_M.gguf" }
         # qvikhr 1.7B minimum viable
-        [PSCustomObject]@{ name="qvikhr-1b-q8"; file="qvikhr-1b-q8.gguf"; minVram=2600; url="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruct-GGUF/resolve/main/qvikhr-3-1.7b-instruct-q8_0.gguf" }
-        [PSCustomObject]@{ name="qvikhr-1b-q4"; file="qvikhr-1b-q4.gguf"; minVram=1800; url="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruct-GGUF/resolve/main/qvikhr-3-1.7b-instruct-q4_k_m.gguf" }
+        [PSCustomObject]@{ name="qvikhr-1b-q8"; file="qvikhr-1b-q8.gguf"; minVram=2600; url="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruction-GGUF/resolve/main/QVikhr-3-1.7B-Instruction-Q8_0.gguf" }
+        [PSCustomObject]@{ name="qvikhr-1b-q4"; file="qvikhr-1b-q4.gguf"; minVram=1800; url="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruction-GGUF/resolve/main/QVikhr-3-1.7B-Instruction-Q4_K_M.gguf" }
     )
 
     $best = $catalog | Where-Object { $_.minVram -le $budget } | Select-Object -First 1
@@ -575,7 +554,7 @@ function Invoke-Deploy {
                 Write-Host "  Trying emergency fallback qvikhr-4b-q4..." -ForegroundColor Red
                 $m = "$W\models\qvikhr-4b-q4.gguf"
                 if (!(Test-Path $m) -or (Get-Item $m -EA SilentlyContinue).Length -lt 100MB) {
-                    $sz = Download-Model "https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruct-GGUF/resolve/main/qvikhr-3-4b-instruct-q4_k_m.gguf" $m
+                    $sz = Download-Model "https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q4_K_M.gguf" $m
                 } else { $sz = (Get-Item $m).Length }
                 if ($sz -le 100MB) { Write-Host "All downloads failed. Check network." -ForegroundColor Red; exit 1 }
             }
