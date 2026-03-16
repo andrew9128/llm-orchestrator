@@ -131,17 +131,19 @@ function Install-Pkg($pkgId, $label) {
 }
 
 function Download-Model($url, $dest) {
+    # Only curl.exe - no huggingface_hub python (requires login, gets 401)
+    # HF public models work via direct resolve URL + ?download=true
     Remove-Item $dest -ErrorAction SilentlyContinue
-    # HF requires ?download=true for direct file serving (browser does this automatically)
     $dlUrl = if ($url -notmatch "\?") { "$url`?download=true" } else { $url }
-    Write-Host "  curl: $($url.Split('/')[-1])" -ForegroundColor Gray
-    curl.exe -L --retry 3 --retry-delay 3 --retry-connrefused `
-        -H "User-Agent: Mozilla/5.0" `
+    Write-Host "  Downloading: $($url.Split('/')[-1].Split('?')[0])" -ForegroundColor Gray
+    curl.exe -L --retry 3 --retry-delay 5 --retry-connrefused `
+        -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" `
+        -H "Accept: application/octet-stream" `
+        --max-time 3600 `
         $dlUrl -o $dest
-    if ((Test-Path $dest) -and (Get-Item $dest).Length -gt 1MB) {
+    if ((Test-Path $dest) -and (Get-Item $dest).Length -gt 10MB) {
         return (Get-Item $dest).Length
     }
-    # If dest exists but tiny → bad download, remove
     Remove-Item $dest -ErrorAction SilentlyContinue
     return 0
 }
@@ -381,15 +383,19 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
     }
     $errLog = $logPath -replace "\.log$", "_err.log"
     Start-Process "python" -ArgumentList $scriptPath -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errLog
-    for ($i = 1; $i -le 20; $i++) {
+    # First run may download model weights (up to 2 GB) — wait up to 5 min
+    $maxWait = 150   # 150 × 2s = 5 min
+    for ($i = 1; $i -le $maxWait; $i++) {
         Start-Sleep -s 2
         try {
             $r = Invoke-WebRequest -Uri "http://localhost:$port/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
             $h = ($r.Content | ConvertFrom-Json).status
             if ($h -eq "ok") { return }
         } catch {}
+        if ($i -eq 15) { Write-Host "    (downloading model weights, please wait...)" -ForegroundColor Gray }
+        if ($i % 30 -eq 0) { Write-Host "    still loading... ($($i*2)s)" -ForegroundColor Gray }
     }
-    Write-Host "  WARNING: service on port $port not ready in 40s, check log: $errLog" -ForegroundColor Yellow
+    Write-Host "  WARNING: service on port $port not ready in 5 min, check: $errLog" -ForegroundColor Yellow
 }
 
 # =============================================================================
@@ -418,19 +424,18 @@ function Invoke-Deploy {
     Write-Host "  Python: $(& python --version 2>&1)" -ForegroundColor Green
 
     # [2] CUDA DLLs + hf-hub  ── skip if stamp matches
-    Write-Host "[2/7] CUDA DLLs + huggingface-hub..." -ForegroundColor Yellow
+    Write-Host "[2/7] CUDA DLLs..." -ForegroundColor Yellow
     $cudaDllDir = "$W\cuda_dlls"
     if ((Get-Stamp "cuda_dlls") -eq "ok" -and (Test-Path $cudaDllDir) -and (Get-ChildItem $cudaDllDir -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue).Count -gt 0) {
         $cudaDlls = Get-ChildItem $cudaDllDir -Recurse -Filter "*.dll"
-        Write-Host "  CUDA DLLs: cached ($($cudaDlls.Count) dlls) | hf-hub: cached" -ForegroundColor Green
+        Write-Host "  CUDA DLLs: cached ($($cudaDlls.Count) dlls)" -ForegroundColor Green
     } else {
         New-Item -ItemType Directory -Path $cudaDllDir -Force | Out-Null
         & python -m pip install --quiet --upgrade pip 2>&1 | Out-Null
         & python -m pip install --quiet --target $cudaDllDir nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 nvidia-cuda-nvrtc-cu12 2>&1 | Out-Null
-        & python -m pip install --quiet huggingface-hub 2>&1 | Out-Null
         $cudaDlls = Get-ChildItem $cudaDllDir -Recurse -Filter "*.dll"
         Set-Stamp "cuda_dlls" "ok"
-        Write-Host "  CUDA DLLs: $($cudaDlls.Count) installed | hf-hub: OK" -ForegroundColor Green
+        Write-Host "  CUDA DLLs: $($cudaDlls.Count) installed" -ForegroundColor Green
     }
 
     # [3] Engine  ── skip if llama-server.exe already present for this tag
@@ -620,7 +625,7 @@ function Invoke-Deploy {
     if ($launchOcr) {
         Write-Host "  [OCR] Starting PaddleOCR-VL-0.9B port 8013..." -ForegroundColor Yellow
         Write-OcrService
-        Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013 "torch transformers pillow"
+        Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013 "torch torchvision transformers pillow"
         "READY" | Out-File "$W\state_8013.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchEmbed) {
