@@ -271,10 +271,7 @@ function Write-AsrService {
 
 function Write-OcrService {
     # PaddleOCR-VL 0.9B via HuggingFace transformers
-    # NO paddlepaddle framework - pure torch+transformers, no shm.dll conflicts
-    # 109 languages incl Russian, tables, formulas. Requires GPU (~2GB VRAM).
-    # Models: ~1.8GB auto-download to ~/.cache/huggingface on first run
-    # Install: pip install torch transformers>=4.55 pillow
+    # HTTP starts immediately; model loads in background thread
     $lines = @(
         "import json, base64, tempfile, os, time, threading, warnings",
         "from http.server import HTTPServer, BaseHTTPRequestHandler",
@@ -282,21 +279,21 @@ function Write-OcrService {
         "os.environ['TOKENIZERS_PARALLELISM'] = 'false'",
         "IDLE_TIMEOUT = $IDLE_OCR",
         "last_req = [time.time()]",
-        "_mdl = [None]; _prc = [None]",
+        "_mdl = [None]; _prc = [None]; ready = [False]",
         "def load_model():",
-        "    if _mdl[0] is None:",
-        "        import torch",
-        "        from transformers import AutoModelForCausalLM, AutoProcessor",
-        "        dev = 'cuda' if torch.cuda.is_available() else 'cpu'",
-        "        _prc[0] = AutoProcessor.from_pretrained('PaddlePaddle/PaddleOCR-VL', trust_remote_code=True)",
-        "        _mdl[0] = AutoModelForCausalLM.from_pretrained(",
-        "            'PaddlePaddle/PaddleOCR-VL', trust_remote_code=True,",
-        "            torch_dtype=torch.bfloat16).to(dev).eval()",
+        "    import torch",
+        "    from transformers import AutoModelForCausalLM, AutoProcessor",
+        "    dev = 'cuda' if torch.cuda.is_available() else 'cpu'",
+        "    _prc[0] = AutoProcessor.from_pretrained('PaddlePaddle/PaddleOCR-VL', trust_remote_code=True)",
+        "    _mdl[0] = AutoModelForCausalLM.from_pretrained(",
+        "        'PaddlePaddle/PaddleOCR-VL', trust_remote_code=True,",
+        "        torch_dtype=torch.bfloat16).to(dev).eval()",
+        "    ready[0] = True",
         "def run_ocr(path):",
         "    import torch",
         "    from PIL import Image",
         "    dev = 'cuda' if torch.cuda.is_available() else 'cpu'",
-        "    img = Image.open(path).convert('RGB')",
+        "    img  = Image.open(path).convert('RGB')",
         "    msgs = [{'role':'user','content':'OCR:'}]",
         "    txt  = _prc[0].apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)",
         "    inp  = _prc[0](text=[txt], images=[img], return_tensors='pt')",
@@ -309,8 +306,12 @@ function Write-OcrService {
         "    def do_GET(self):",
         "        if self.path == '/health':",
         "            self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
-        "            self.wfile.write(json.dumps({'status':'ok'}).encode())",
+        "            st = 'ok' if ready[0] else 'loading'",
+        "            self.wfile.write(json.dumps({'status': st}).encode())",
         "    def do_POST(self):",
+        "        if not ready[0]:",
+        "            self.send_response(503); self.send_header('Content-Type','application/json'); self.end_headers()",
+        "            self.wfile.write(json.dumps({'error':'loading'}).encode()); return",
         "        last_req[0] = time.time()",
         "        n    = int(self.headers.get('Content-Length', 0))",
         "        body = json.loads(self.rfile.read(n))",
@@ -326,9 +327,9 @@ function Write-OcrService {
         "def watcher():",
         "    while True:",
         "        time.sleep(30)",
-        "        if time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)",
+        "        if ready[0] and time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)",
         "threading.Thread(target=watcher, daemon=True).start()",
-        "load_model()",
+        "threading.Thread(target=load_model, daemon=True).start()",
         "HTTPServer(('0.0.0.0', 8013), H).serve_forever()"
     )
     $lines -join "`n" | Out-File "$W\ocr_service.py" -Encoding UTF8 -NoNewline
@@ -341,33 +342,43 @@ function Write-EmbedService {
         "IDLE_TIMEOUT = $IDLE_EMBED",
         "last_req = [time.time()]",
         "model = [None]",
+        "ready  = [False]",
+        "err_msg = [None]",
         "def load_model():",
-        "    if model[0] is None:",
+        "    try:",
         "        from sentence_transformers import SentenceTransformer",
         "        model[0] = SentenceTransformer('ai-forever/ru-en-RoSBERTa')",
-        "    return model[0]",
+        "        ready[0] = True",
+        "    except Exception as e:",
+        "        err_msg[0] = str(e)",
+        "        print(f'LOAD_ERROR: {e}', file=sys.stderr, flush=True)",
         "class H(BaseHTTPRequestHandler):",
         "    def log_message(self, f, *a): pass",
         "    def do_GET(self):",
         "        if self.path == '/health':",
         "            self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
-        "            self.wfile.write(json.dumps({'status':'ok'}).encode())",
+        "            if ready[0]:     st = 'ok'",
+        "            elif err_msg[0]: st = 'error: ' + err_msg[0][:80]",
+        "            else:            st = 'loading'",
         "    def do_POST(self):",
+        "        if not ready[0]:",
+        "            self.send_response(503); self.send_header('Content-Type','application/json'); self.end_headers()",
+        "            self.wfile.write(json.dumps({'error': err_msg[0] or 'loading'}).encode()); return",
         "        last_req[0] = time.time()",
-        "        n = int(self.headers.get('Content-Length',0))",
+        "        n = int(self.headers.get('Content-Length', 0))",
         "        body = json.loads(self.rfile.read(n))",
         "        texts = body.get('input', [])",
         "        if isinstance(texts, str): texts = [texts]",
-        "        vecs = load_model().encode(texts).tolist()",
+        "        vecs = model[0].encode(texts).tolist()",
         "        data = [{'index': i, 'embedding': v} for i, v in enumerate(vecs)]",
         "        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
         "        self.wfile.write(json.dumps({'object':'list','data':data}).encode())",
         "def watcher():",
         "    while True:",
         "        time.sleep(60)",
-        "        if time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)",
+        "        if ready[0] and time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)",
         "threading.Thread(target=watcher, daemon=True).start()",
-        "load_model()",
+        "threading.Thread(target=load_model, daemon=True).start()",
         "HTTPServer(('0.0.0.0', 8014), H).serve_forever()"
     )
     $lines -join "`n" | Out-File "$W\embed_service.py" -Encoding UTF8 -NoNewline
@@ -378,24 +389,40 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
     try { $null = & python --version 2>&1; $pyOk = ($LASTEXITCODE -eq 0) } catch {}
     if (!$pyOk) { Write-Host "  Python not found, skipping port $port" -ForegroundColor Red; return }
     if ($packages) {
-        $pkgList = $packages.Split(" ")
-        & python -m pip install --quiet $pkgList 2>&1 | Out-Null
+        foreach ($pkg in $packages.Split(" ")) {
+            $res = & python -m pip install --quiet $pkg 2>&1
+            $err = $res | Where-Object { $_ -match "^ERROR|Could not find|No matching" }
+            if ($err) { Write-Host "  pip [$pkg] FAILED: $($err[0])" -ForegroundColor Red }
+        }
     }
     $errLog = $logPath -replace "\.log$", "_err.log"
-    Start-Process "python" -ArgumentList $scriptPath -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errLog
-    # First run may download model weights (up to 2 GB) — wait up to 5 min
-    $maxWait = 150   # 150 × 2s = 5 min
+    Start-Process "python" -ArgumentList $scriptPath -WindowStyle Hidden `
+        -RedirectStandardOutput $logPath -RedirectStandardError $errLog
+    # HTTP server starts immediately; model loads in background thread
+    # "loading" = alive, "ok" = ready. Wait up to 8 min (first run downloads weights)
+    $maxWait = 240   # 240 × 2s = 8 min
     for ($i = 1; $i -le $maxWait; $i++) {
         Start-Sleep -s 2
         try {
             $r = Invoke-WebRequest -Uri "http://localhost:$port/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
             $h = ($r.Content | ConvertFrom-Json).status
             if ($h -eq "ok") { return }
-        } catch {}
-        if ($i -eq 15) { Write-Host "    (downloading model weights, please wait...)" -ForegroundColor Gray }
-        if ($i % 30 -eq 0) { Write-Host "    still loading... ($($i*2)s)" -ForegroundColor Gray }
+            if ($i -eq 3) { Write-Host "    (server up, loading model...)" -ForegroundColor Gray }
+        } catch {
+            if ($i -eq 10) { Write-Host "    (waiting for server start...)" -ForegroundColor Gray }
+        }
+        # Early crash detection at 20s
+        if ($i -eq 10) {
+            $tail = Get-Content $errLog -Tail 5 -ErrorAction SilentlyContinue
+            if ($tail -match "Traceback|ImportError|ModuleNotFoundError") {
+                Write-Host "  CRASH: $errLog" -ForegroundColor Red
+                $tail | Select-Object -Last 3 | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+                return
+            }
+        }
+        if ($i % 60 -eq 0) { Write-Host "    still loading... ($($i*2)s)" -ForegroundColor Gray }
     }
-    Write-Host "  WARNING: service on port $port not ready in 5 min, check: $errLog" -ForegroundColor Yellow
+    Write-Host "  WARNING: port $port not ready in 8 min, check: $errLog" -ForegroundColor Yellow
 }
 
 # =============================================================================
@@ -625,7 +652,7 @@ function Invoke-Deploy {
     if ($launchOcr) {
         Write-Host "  [OCR] Starting PaddleOCR-VL-0.9B port 8013..." -ForegroundColor Yellow
         Write-OcrService
-        Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013 "torch torchvision transformers pillow"
+        Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013 "torch torchvision transformers pillow einops"
         "READY" | Out-File "$W\state_8013.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchEmbed) {
