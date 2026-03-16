@@ -296,7 +296,7 @@ function Write-OcrService {
         "        from surya.detection import DetectionPredictor",
         "        from surya.recognition import RecognitionPredictor",
         "        det_pred = DetectionPredictor()",
-        "        rec_pred = RecognitionPredictor(det_pred)",
+        "        rec_pred = RecognitionPredictor()",
         "        _ocr[0] = (det_pred, rec_pred)",
         "        ready[0] = True",
         "    except Exception as e:",
@@ -305,10 +305,9 @@ function Write-OcrService {
         "        print(f'LOAD_ERROR: {e}', file=sys.stderr, flush=True)",
         "def do_ocr(image_path):",
         "    from PIL import Image",
-        "    from surya.ocr import run_ocr",
         "    det_pred, rec_pred = _ocr[0]",
         "    img  = Image.open(image_path).convert('RGB')",
-        "    res  = run_ocr([img], [['ru', 'en']], det_pred, rec_pred)",
+        "    res  = rec_pred([img], [['ru', 'en']], det_pred)",
         "    lines = [line.text for page in res for line in page.text_lines if line.text.strip()]",
         "    return chr(10).join(lines)",
         "class H(BaseHTTPRequestHandler):",
@@ -435,9 +434,11 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
         if ($torchParts.Count -gt 1) { $torchMinor = [int]$torchParts[1] } else { $torchMinor = 0 }
         $torchOld = ($torchMajor -lt 2) -or ($torchMajor -eq 2 -and $torchMinor -lt 7)
         $torchCpu = ($torchBuild -eq "cpu") -or ($torchBuild -eq "")
-        if ($torchOld -or $torchCpu) {
+        $torchStamp = Get-Stamp "torch_cuda"
+        if (($torchOld -or $torchCpu) -and $torchStamp -ne "cu124") {
             Write-Host "  Torch '$currentTorch' needs CUDA. Upgrading..." -ForegroundColor Yellow
             & python -m pip install --quiet torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --upgrade --no-cache-dir 2>&1 | Out-Null
+            Set-Stamp "torch_cuda" "cu124"
         } else {
             Write-Host "  Torch '$currentTorch' OK" -ForegroundColor Green
         }
@@ -447,7 +448,7 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
         $suryaInstalled = & python -m pip show surya-ocr 2>$null | Select-String "^Version:" | ForEach-Object { $_ -replace "Version:\s*","" }
         if ($suryaStamp -ne "$suryaInstalled" -or -not $suryaInstalled) {
             Write-Host "  Installing surya-ocr..." -ForegroundColor Gray
-            & python -m pip install --quiet --prefer-binary "surya-ocr>=0.6,<0.7" 2>> $errLog | Out-Null
+            & python -m pip install --quiet --prefer-binary "surya-ocr>=0.9,<0.10" 2>> $errLog | Out-Null
             $suryaInstalled = & python -m pip show surya-ocr 2>$null | Select-String "^Version:" | ForEach-Object { $_ -replace "Version:\s*","" }
             if ($suryaInstalled) { Set-Stamp "surya_ocr" "$suryaInstalled" }
             # Clear stale HF model cache for surya (old config.json lacks bbox_size)
@@ -464,9 +465,13 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
 
         # torchvision CUDA pin - AFTER surya install (surya pulls CPU torchvision)
         $tvBuild = & python -c "import torchvision; v=torchvision.__version__; print('cuda' if '+cu' in v else 'cpu')" 2>$null
-        if ($tvBuild -ne "cuda") {
+        $tvStamp = Get-Stamp "torchvision_cuda"
+        if ($tvBuild -ne "cuda" -or $tvStamp -ne "cu124") {
             Write-Host "  Pinning torchvision CUDA..." -ForegroundColor Yellow
             & python -m pip install --quiet torchvision --index-url https://download.pytorch.org/whl/cu124 --upgrade --force-reinstall --no-cache-dir 2>&1 | Out-Null
+            Set-Stamp "torchvision_cuda" "cu124"
+        } else {
+            Write-Host "  torchvision CUDA OK (cached)" -ForegroundColor Green
         }
         $tvCheck = & python -c "import torchvision.ops; torchvision.ops.nms; print('ok')" 2>$null
         if ($tvCheck -eq "ok") {
