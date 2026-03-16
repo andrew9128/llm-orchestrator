@@ -450,7 +450,7 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
         $cacheStamp = Get-Stamp "surya_cache"
         if ($suryaStamp -ne $suryaInstalled -or -not $suryaInstalled) {
             Write-Host "  Installing surya-ocr..." -ForegroundColor Gray
-            & python -m pip install --quiet --prefer-binary "surya-ocr>=0.9,<0.10" 2>> $errLog | Out-Null
+            & python -m pip install --quiet --prefer-binary "surya-ocr" 2>> $errLog | Out-Null
             $suryaInstalled = & python -m pip show surya-ocr 2>$null | Select-String "^Version:" | ForEach-Object { $_ -replace "Version:\s*","" }
             if ($suryaInstalled) { Set-Stamp "surya_ocr" $suryaInstalled }
         } else {
@@ -518,7 +518,7 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM AUTO-DEPLOY v14.2-fix3 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM AUTO-DEPLOY v14.2-fix5 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
     Write-Host "    On-demand: services start on request, auto-unload on idle" -ForegroundColor Gray
 
     Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -773,23 +773,18 @@ function Invoke-Deploy {
         Start-SpecialService "$W\asr_service.py" "$W\asr.log" 8011 "gigaam"
         "READY" | Out-File "$W\state_8011.txt" -Encoding UTF8 -NoNewline
     }
+    # OCR installed BEFORE Embed: surya pulls transformers>=4.56.1,
+    # Embed then reuses that - avoids the 'encoder' KeyError from version conflict
     if ($launchOcr) {
         Write-Host "  [OCR] Starting surya-ocr port 8013..." -ForegroundColor Yellow
-        $hfModCache = "$env:USERPROFILE\.cache\huggingface\modules\transformers_modules\PaddlePaddle"
-        if (Test-Path $hfModCache) {
-            Remove-Item $hfModCache -Recurse -Force -ErrorAction SilentlyContinue
-        }
         Write-OcrService
-        & python -m pip install --quiet --upgrade "surya-ocr>=0.6" 2>&1 | Out-Null
         Start-SpecialService "$W\ocr_service.py" "$W\ocr.log" 8013 "surya-ocr"
         "READY" | Out-File "$W\state_8013.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchEmbed) {
         Write-Host "  [Embed] Starting RoSBERTa port 8014..." -ForegroundColor Yellow
         Write-EmbedService
-        # RoSBERTa needs transformers 4.x and torch (CPU is fine for embeddings)
-        # Install in correct order to avoid version conflicts
-        Start-SpecialService "$W\embed_service.py" "$W\embed.log" 8014 "transformers==4.44.2 torch"
+        Start-SpecialService "$W\embed_service.py" "$W\embed.log" 8014 "transformers torch"
         "READY" | Out-File "$W\state_8014.txt" -Encoding UTF8 -NoNewline
     }
 
