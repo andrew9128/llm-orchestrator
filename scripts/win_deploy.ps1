@@ -159,7 +159,7 @@ function Install-Pkg($pkgId, $label) {
 
 function Download-Model($url, $dest) {
     Remove-Item $dest -ErrorAction SilentlyContinue
-    $dlUrl = if ($url -notmatch "\?") { "$url`?download=true" } else { $url }
+    if ($url -notmatch "\?") { $dlUrl = "$url`?download=true" } else { $dlUrl = $url }
     Write-Host "  Downloading: $($url.Split('/')[-1].Split('?')[0])" -ForegroundColor Gray
     curl.exe -L --retry 3 --retry-delay 5 --retry-connrefused `
         -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" `
@@ -429,8 +429,8 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
         # Strip build suffix like +cu124, +cpu, etc. before version comparison
         $torchClean = ($currentTorch -split '\+')[0]
         $torchParts = $torchClean -split '\.'
-        $torchMajor = if ($torchParts.Count -gt 0) { [int]$torchParts[0] } else { 0 }
-        $torchMinor = if ($torchParts.Count -gt 1) { [int]$torchParts[1] } else { 0 }
+        if ($torchParts.Count -gt 0) { $torchMajor = [int]$torchParts[0] } else { $torchMajor = 0 }
+        if ($torchParts.Count -gt 1) { $torchMinor = [int]$torchParts[1] } else { $torchMinor = 0 }
         $torchOld = ($torchMajor -lt 2) -or ($torchMajor -eq 2 -and $torchMinor -lt 7)
         if ($torchOld) {
             Write-Host "  Torch version $currentTorch is too old. Upgrading..." -ForegroundColor Yellow
@@ -478,7 +478,7 @@ function Invoke-Deploy {
     }
     Write-Host "  Python: $(& python --version 2>&1)" -ForegroundColor Green
 
-    # [2] CUDA DLLs — skip if stamp matches
+    # [2] CUDA DLLs - skip if stamp matches
     Write-Host "[2/7] CUDA DLLs..." -ForegroundColor Yellow
     $cudaDllDir = "$W\cuda_dlls"
     if ((Get-Stamp "cuda_dlls") -eq "ok" -and (Test-Path $cudaDllDir) -and (Get-ChildItem $cudaDllDir -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue).Count -gt 0) {
@@ -493,7 +493,7 @@ function Invoke-Deploy {
         Write-Host "  CUDA DLLs: $($cudaDlls.Count) installed" -ForegroundColor Green
     }
 
-    # [3] Engine — skip if llama-server.exe already present for this tag
+    # [3] Engine - skip if llama-server.exe already present for this tag
     Write-Host "[3/7] Engine..." -ForegroundColor Yellow
     $exePath = Get-ChildItem "$W\bin" -Recurse -Filter "llama-server.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
     if ((Get-Stamp "engine") -eq $tag -and $exePath -and (Test-Path $exePath)) {
@@ -518,7 +518,7 @@ function Invoke-Deploy {
         Write-Host "  Engine installed. DLLs in bin: $((Get-ChildItem $binDir -Filter *.dll).Count)" -ForegroundColor Green
     }
 
-    # [4] Test engine — skip if stamp says cuda ok for this tag
+    # [4] Test engine - skip if stamp says cuda ok for this tag
     Write-Host "[4/7] Testing engine..." -ForegroundColor Yellow
     if ((Get-Stamp "engine_type") -eq "cuda_$tag") {
         Write-Host "  Engine type: CUDA (cached check)" -ForegroundColor Green
@@ -579,7 +579,7 @@ function Invoke-Deploy {
 
     $totalVram  = ($selectedDevices | Measure-Object -Property vram -Sum).Sum
     $deviceList = ($selectedDevices | ForEach-Object { $_.name }) -join ","
-    $deviceArg  = if ($deviceList) { "--device $deviceList" } else { "" }
+    if ($deviceList) { $deviceArg = "--device $deviceList" } else { $deviceArg = "" }
     Write-Host "  Using: $deviceList | Total VRAM: $totalVram MiB" -ForegroundColor Green
 
     # [6] Model selection
@@ -647,18 +647,14 @@ function Invoke-Deploy {
     Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\run.ps1"
 
     # Wait for LLM to become healthy.
-    # No hard timeout — bail only if the llama-server process dies.
-    # llama.cpp returns HTTP 503 {"status":"loading model"} while loading,
-    # then HTTP 200 {"status":"ok"} when ready. Both must be handled correctly
-    # because Invoke-WebRequest -ErrorAction Stop throws on 503, discarding the body.
+    # No hard timeout - bail only if the llama-server process dies.
+    # Use HttpWebRequest to read body even on HTTP 503 (loading model).
     $ok = $false
     $elapsed = 0
-    $lastMsg = ""
     while ($true) {
         Start-Sleep -s 5
         $elapsed += 5
 
-        # Try to read /health, including the body on non-200 responses
         $healthStatus = ""
         try {
             $req = [System.Net.HttpWebRequest]::Create("http://localhost:8010/health")
@@ -666,40 +662,44 @@ function Invoke-Deploy {
             $req.Method = "GET"
             try {
                 $resp = $req.GetResponse()
-                $body = [System.IO.StreamReader]::new($resp.GetResponseStream()).ReadToEnd()
+                $sr = [System.IO.StreamReader]::new($resp.GetResponseStream())
+                $body = $sr.ReadToEnd()
+                $sr.Close()
                 $resp.Close()
-                $healthStatus = ($body | ConvertFrom-Json -ErrorAction SilentlyContinue).status
+                $parsed = $body | ConvertFrom-Json -ErrorAction SilentlyContinue
+                if ($parsed) { $healthStatus = $parsed.status }
             } catch [System.Net.WebException] {
                 $webResp = $_.Exception.Response
                 if ($webResp -ne $null) {
-                    $body = [System.IO.StreamReader]::new($webResp.GetResponseStream()).ReadToEnd()
-                    $healthStatus = ($body | ConvertFrom-Json -ErrorAction SilentlyContinue).status
+                    $sr2 = [System.IO.StreamReader]::new($webResp.GetResponseStream())
+                    $body2 = $sr2.ReadToEnd()
+                    $sr2.Close()
+                    $parsed2 = $body2 | ConvertFrom-Json -ErrorAction SilentlyContinue
+                    if ($parsed2) { $healthStatus = $parsed2.status }
                 }
-                # connection refused / no response = healthStatus stays ""
             }
         } catch {}
 
         if ($healthStatus -eq "ok") { $ok = $true; break }
 
-        # Bail if process died
         $alive = [bool](Get-Process -Name "llama-server" -ErrorAction SilentlyContinue)
         if (-not $alive) {
-            Write-Host "  llama-server process not found — crashed?" -ForegroundColor Red
+            Write-Host "  llama-server process not found - crashed?" -ForegroundColor Red
             break
         }
 
-        # Progress every 30s, show actual status
         if ($elapsed % 30 -eq 0) {
-            $msg = if ($healthStatus) { $healthStatus } else { "no response yet" }
-            Write-Host ("  loading... ({0}s, status: {1})" -f $elapsed, $msg) -ForegroundColor Gray
+            $statusWord = $healthStatus
+            if (-not $statusWord) { $statusWord = "no response yet" }
+            Write-Host ("  loading... " + $elapsed + "s, status: " + $statusWord) -ForegroundColor Gray
         }
     }
-    if (!$ok) {
+    if (-not $ok) {
         Write-Host "FAILED to start LLM. Log:" -ForegroundColor Red
         if (Test-Path "$W\server.log") { Get-Content "$W\server.log" -Tail 30 }
         exit 1
     }
-    Write-Host ("  LLM ready ({0}s)." -f $elapsed) -ForegroundColor Green
+    Write-Host ("  LLM ready in " + $elapsed + "s.") -ForegroundColor Green
     "READY" | Out-File "$W\state_8010.txt" -Encoding UTF8 -NoNewline
 
     $launchAsr   = $Mode -in @("voice","full")
