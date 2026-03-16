@@ -1,4 +1,4 @@
-# LLM WIN DEPLOY v14.2-fix1
+# LLM WIN DEPLOY v14.2-fix2
 # On-demand model lifecycle: STOPPED -> LOADING -> READY -> IDLE -> STOPPED
 # All services (LLM, ASR, OCR, Embedding) start on request, unload on idle_timeout
 #
@@ -6,6 +6,7 @@
 #   [fix1] Write-OcrService: surya 0.6.x predictor API (DetectionPredictor/RecognitionPredictor)
 #   [fix2] Write-EmbedService: trust_remote_code=True for ai-forever/ru-en-RoSBERTa
 #   [fix3] Start-SpecialService: proper torch version compare (handles 2.10+, strips +cu124 suffix)
+#   [fix4] LLM health-check timeout 240s→600s (RTX 5060 Blackwell CC 12.0 compiles CUDA kernels on 1st run)
 #
 # Usage:
 #   win_deploy.ps1                        -- deploy chat mode (default)
@@ -435,7 +436,7 @@ function Start-SpecialService($scriptPath, $logPath, $port, $packages) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM AUTO-DEPLOY v14.2-fix1 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM AUTO-DEPLOY v14.2-fix2 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
     Write-Host "    On-demand: services start on request, auto-unload on idle" -ForegroundColor Gray
 
     Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -624,21 +625,23 @@ function Invoke-Deploy {
 
     Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\run.ps1"
 
+    # RTX 5060 (Blackwell CC 12.0) compiles CUDA kernels on first run — allow up to 10 min
     $ok = $false
-    for ($i = 1; $i -le 80; $i++) {
+    for ($i = 1; $i -le 200; $i++) {
         Start-Sleep -s 3
         try {
             $r = Invoke-WebRequest -Uri "http://localhost:8010/health" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
             $h = ($r.Content | ConvertFrom-Json).status
             if ($h -eq "ok" -or $h -eq "loading model") { $ok = $true; break }
         } catch {}
-        if ($i % 5 -eq 0) { Write-Host "  loading... ($($i*3)s)" -ForegroundColor Gray }
+        if ($i % 10 -eq 0) { Write-Host "  loading... ($($i*3)s / 600s max)" -ForegroundColor Gray }
     }
     if (!$ok) {
-        Write-Host "FAILED to start LLM. Log:" -ForegroundColor Red
+        Write-Host "FAILED to start LLM after 600s. Log:" -ForegroundColor Red
         if (Test-Path "$W\server.log") { Get-Content "$W\server.log" -Tail 30 }
         exit 1
     }
+    Write-Host "  LLM ready." -ForegroundColor Green
     "READY" | Out-File "$W\state_8010.txt" -Encoding UTF8 -NoNewline
 
     $launchAsr   = $Mode -in @("voice","full")
@@ -674,7 +677,7 @@ function Invoke-Deploy {
     Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-ExecutionPolicy", "Bypass", "-File", $wdScript
 
     Write-Host ""
-    Write-Host "SUCCESS - LLM Orchestrator v14.2-fix1" -ForegroundColor Green
+    Write-Host "SUCCESS - LLM Orchestrator v14.2-fix2" -ForegroundColor Green
     Write-Host "  Mode:    $Mode"                         -ForegroundColor Green
     Write-Host "  Model:   $($candidate.name)"            -ForegroundColor Green
     Write-Host "  GPUs:    $deviceList ($totalVram MiB)"  -ForegroundColor Green
