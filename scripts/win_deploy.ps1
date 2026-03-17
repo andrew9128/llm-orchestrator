@@ -950,7 +950,12 @@ function Invoke-Deploy {
     }
 
     $wdScript = "$W\watchdog.ps1"
-    curl.exe -L "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_watchdog.ps1" -o $wdScript --silent
+    # Download watchdog - prefer repo version, fallback keeps existing
+    $wdTmp = "$env:TEMP\wd_new.ps1"
+    curl.exe -s -L "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_watchdog.ps1" -o $wdTmp 2>$null
+    if ((Test-Path $wdTmp) -and (Get-Item $wdTmp).Length -gt 1kb) {
+        Copy-Item $wdTmp $wdScript -Force
+    }
     Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-ExecutionPolicy", "Bypass", "-File", $wdScript
 
     Write-Host ""

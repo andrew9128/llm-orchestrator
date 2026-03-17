@@ -1,401 +1,364 @@
-# LLM WATCHDOG v14.2
-# On-demand lifecycle for all services (LLM, ASR, OCR, Embedding)
-# Key fix: wake-proxy listens on STOPPED ports, catches requests, creates trigger
-# Flow: READY -> idle -> STOPPED -> wake-proxy on port -> trigger -> LOADING -> READY
+# LLM WATCHDOG v14.4
+# Monitors all services, restarts on crash, wake-proxy forwards original request after startup
 $ProgressPreference = "SilentlyContinue"
 $W = "$env:USERPROFILE\llm_native"
 $watchdogLog = "$W\watchdog.log"
 
+function Log($msg) {
+    $ts = Get-Date -Format "HH:mm:ss"
+    $line = "[$ts] $msg"
+    Add-Content $watchdogLog $line
+}
+
+# Read config written by win_deploy.ps1
+$cfg = $null
+if (Test-Path "$W\config.json") {
+    try { $cfg = Get-Content "$W\config.json" -Raw | ConvertFrom-Json } catch {}
+}
+$IDLE_LLM   = if ($cfg -and $cfg.idleLlm)   { $cfg.idleLlm }   else { 600 }
+$IDLE_ASR   = if ($cfg -and $cfg.idleAsr)   { $cfg.idleAsr }   else { 300 }
+$IDLE_OCR   = if ($cfg -and $cfg.idleOcr)   { $cfg.idleOcr }   else { 300 }
+$IDLE_EMBED = if ($cfg -and $cfg.idleEmbed) { $cfg.idleEmbed } else { 900 }
+$launchOcr   = $cfg -and $cfg.launchOcr
+$launchEmbed = $cfg -and $cfg.launchEmbed
+$launchAsr   = $cfg -and $cfg.launchAsr
+
+Log "Watchdog v14.4 started."
+Log ("Idle timeouts: LLM=" + $IDLE_LLM + "s ASR=" + $IDLE_ASR + "s OCR=" + $IDLE_OCR + "s Embed=" + $IDLE_EMBED + "s")
+
 # =============================================================================
 # HELPERS
 # =============================================================================
-function Log($msg) {
-    $ts = (Get-Date).ToString("HH:mm:ss")
-    $line = "[$ts] $msg"
-    Write-Host $line
-    Add-Content $watchdogLog $line -ErrorAction SilentlyContinue
-}
-
-function Test-Port($port) {
+function Get-ServiceStatus($port) {
     try {
-        $r = Invoke-WebRequest -Uri "http://localhost:$port/health" -UseBasicParsing -TimeoutSec 4 -ErrorAction Stop
-        return ($r.Content | ConvertFrom-Json).status
+        $req = [System.Net.HttpWebRequest]::Create("http://localhost:$port/health")
+        $req.Timeout = 3000; $req.Method = "GET"
+        try {
+            $resp = $req.GetResponse()
+            $sr = [System.IO.StreamReader]::new($resp.GetResponseStream())
+            $body = $sr.ReadToEnd(); $sr.Close(); $resp.Close()
+            return ($body | ConvertFrom-Json -EA SilentlyContinue).status
+        } catch [System.Net.WebException] {
+            $wr = $_.Exception.Response
+            if ($wr) {
+                $sr2 = [System.IO.StreamReader]::new($wr.GetResponseStream())
+                $b2 = $sr2.ReadToEnd(); $sr2.Close()
+                return ($b2 | ConvertFrom-Json -EA SilentlyContinue).status
+            }
+            return "down"
+        }
     } catch { return "down" }
 }
 
-function Get-CurrentCtx {
-    if (Test-Path "$W\run.ps1") {
-        $c = Get-Content "$W\run.ps1" -Raw
-        if ($c -match "--ctx-size (\d+)") { return [int]$Matches[1] }
+function Wait-ServiceReady($port, $timeoutSec) {
+    $t = 0
+    while ($t -lt $timeoutSec) {
+        Start-Sleep -s 2; $t += 2
+        $st = Get-ServiceStatus $port
+        if ($st -eq "ok") { return $true }
+        if ($st -and $st -ne "loading" -and $st -ne "down") { return $false }
     }
-    return 8192
-}
-
-function Reduce-Ctx($current) {
-    $steps = @(65536, 32768, 16384, 8192, 4096, 2048)
-    foreach ($s in $steps) { if ($s -lt $current) { return $s } }
-    return 2048
-}
-
-function Update-CtxInRunScript($newCtx) {
-    if (Test-Path "$W\run.ps1") {
-        $c = Get-Content "$W\run.ps1" -Raw
-        $c = $c -replace "--ctx-size \d+", "--ctx-size $newCtx"
-        [System.IO.File]::WriteAllText("$W\run.ps1", $c, [System.Text.UTF8Encoding]::new($false))
-    }
-}
-
-function Set-State($port, $stateVal) {
-    $stateVal | Out-File "$W\state_$port.txt" -Encoding UTF8 -NoNewline
-}
-
-function Start-LLMServer {
-    if (!(Test-Path "$W\run.ps1")) { Log "run.ps1 not found"; return $false }
-    Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\run.ps1"
-    return $true
-}
-
-function Stop-LLMServer {
-    Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -s 3
-    Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
-}
-
-function Start-SpecialSvc($scriptFile, $port) {
-    if (!(Test-Path $scriptFile)) { Log "[$port] Script not found: $scriptFile"; return $false }
-    $log = "$W\svc_$port.log"; $err = "$W\svc_${port}_err.log"
-    Start-Process "python" -ArgumentList $scriptFile -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err
-    for ($i = 1; $i -le 15; $i++) {
-        Start-Sleep -s 2
-        if ((Test-Port $port) -eq "ok") { return $true }
-    }
-    Log "[$port] Did not become healthy in 30s"
     return $false
 }
 
-function Stop-SpecialSvc($port) {
-    Get-WmiObject Win32_Process | Where-Object {
-        $_.Name -match "python" -and $_.CommandLine -match "svc_service_$port|asr_service|ocr_service|embed_service"
-    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    # Also kill any wake-proxy on this port
-    Get-WmiObject Win32_Process | Where-Object {
-        $_.Name -match "python" -and $_.CommandLine -match "wake_proxy" -and $_.CommandLine -match "$port"
-    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+function Start-PythonService($scriptPath, $logPath) {
+    $errLog = $logPath -replace "\.log$", "_err.log"
+    Start-Process "python" -ArgumentList $scriptPath -WindowStyle Hidden `
+        -RedirectStandardOutput $logPath -RedirectStandardError $errLog
 }
 
-# =============================================================================
-# WAKE PROXY
-# Starts a tiny Python HTTP server on $port while service is STOPPED.
-# Any incoming request → creates wake_PORT.trigger → returns 503
-# Proxy exits when real service comes up (port re-bound by real service)
-# =============================================================================
-function Write-WakeProxy($port, $svcName) {
-    $proxyScript = "$W\wake_proxy_$port.py"
-    $triggerFile = "$W\wake_$port.trigger"
-    # Use string formatting to embed values safely
-    $py = @"
-import socket, os, time, threading, sys
-
-PORT = $port
-TRIGGER = r'$triggerFile'
-W = r'$W'
-NAME = '$svcName'
-state_file = os.path.join(W, f'state_{PORT}.txt')
-
-def write_trigger():
-    with open(TRIGGER, 'w') as f:
-        f.write('wake')
-
-def check_real_service():
-    # Exit when real service takes over the port
-    time.sleep(5)
-    while True:
-        try:
-            import urllib.request
-            r = urllib.request.urlopen(f'http://127.0.0.1:{PORT}/health', timeout=2)
-            data = r.read().decode()
-            if 'ok' in data and 'wake_proxy' not in data:
-                sys.exit(0)
-        except Exception:
-            pass
-        time.sleep(3)
-
-# Start checker thread
-t = threading.Thread(target=check_real_service, daemon=True)
-t.start()
-
-# Simple raw socket server - no port conflict with real service
-srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-try:
-    srv.bind(('0.0.0.0', PORT))
-except OSError:
-    sys.exit(0)  # Real service already on port
-
-srv.listen(5)
-srv.settimeout(120)
-
-triggered = False
-
-while True:
-    try:
-        conn, addr = srv.accept()
-        try:
-            data = conn.recv(4096).decode('utf-8', errors='ignore')
-            if '/health' in data and not triggered:
-                # Health check: return "starting"
-                body = '{\"status\":\"starting\",\"msg\":\"' + NAME + ' is waking up, retry in 30s\"}'
-            else:
-                # Any other request: trigger wake + 503
-                if not triggered:
-                    write_trigger()
-                    triggered = True
-                body = '{\"error\":\"service starting\",\"retry_after\":30}'
-            headers = f'HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n'
-            conn.sendall((headers + body).encode())
-        except Exception:
-            pass
-        finally:
-            conn.close()
-        
-        if triggered:
-            # Wrote trigger, give watchdog time to start real service, then exit
-            time.sleep(10)
-            srv.close()
-            sys.exit(0)
-    except socket.timeout:
-        # No requests for 2 min - exit, real service probably not needed
-        srv.close()
-        sys.exit(0)
-    except Exception:
-        sys.exit(0)
-"@
-    [System.IO.File]::WriteAllText($proxyScript, $py, [System.Text.UTF8Encoding]::new($false))
-    return $proxyScript
-}
-
-function Start-WakeProxy($port, $svcName) {
-    # Kill any existing proxy on this port
-    Get-WmiObject Win32_Process | Where-Object {
-        $_.Name -match "python" -and $_.CommandLine -match "wake_proxy_$port"
-    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    Start-Sleep -s 1
-
-    $proxyScript = Write-WakeProxy $port $svcName
-    $proxyLog = "$W\wake_proxy_$port.log"
-    Start-Process "python" -ArgumentList $proxyScript -WindowStyle Hidden -RedirectStandardOutput $proxyLog -RedirectStandardError "$proxyLog.err"
-    Start-Sleep -s 1
-    Log "[$port] Wake proxy started (will catch requests and wake service)"
-}
-
-function Stop-WakeProxy($port) {
-    Get-WmiObject Win32_Process | Where-Object {
-        $_.Name -match "python" -and $_.CommandLine -match "wake_proxy_$port"
-    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-}
-
-# =============================================================================
-# LOAD CONFIG
-# =============================================================================
-function Load-Config {
-    if (Test-Path "$W\config.json") {
-        try { return Get-Content "$W\config.json" -Raw | ConvertFrom-Json } catch {}
-    }
-    return [PSCustomObject]@{
-        idleLlm=600; idleAsr=300; idleOcr=300; idleEmbed=900
-        launchAsr=$false; launchOcr=$false; launchEmbed=$false
+function Forward-Request($port, $method, $path, $body, $contentType) {
+    # Forward original request to the now-running service
+    try {
+        $uri = "http://localhost:$port$path"
+        $req = [System.Net.HttpWebRequest]::Create($uri)
+        $req.Method = $method
+        $req.Timeout = 120000
+        if ($contentType) { $req.ContentType = $contentType }
+        if ($body -and $body.Length -gt 0) {
+            $req.ContentLength = $body.Length
+            $stream = $req.GetRequestStream()
+            $stream.Write($body, 0, $body.Length)
+            $stream.Close()
+        }
+        try {
+            $resp = $req.GetResponse()
+            $sr = [System.IO.StreamReader]::new($resp.GetResponseStream())
+            $rb = $sr.ReadToEnd(); $sr.Close(); $resp.Close()
+            return @{ code = 200; body = $rb; ct = $resp.ContentType }
+        } catch [System.Net.WebException] {
+            $wr = $_.Exception.Response
+            if ($wr) {
+                $sr2 = [System.IO.StreamReader]::new($wr.GetResponseStream())
+                $rb2 = $sr2.ReadToEnd(); $sr2.Close()
+                return @{ code = [int]$wr.StatusCode; body = $rb2; ct = "application/json" }
+            }
+            return @{ code = 503; body = '{"error":"service unavailable"}'; ct = "application/json" }
+        }
+    } catch {
+        return @{ code = 500; body = '{"error":"forward failed"}'; ct = "application/json" }
     }
 }
 
 # =============================================================================
-# MAIN
+# WAKE PROXY - listens on a port, wakes service, waits, forwards request
 # =============================================================================
-Log "Watchdog v14.3 started."
+function Start-WakeProxy($proxyPort, $targetPort, $serviceName, $startScript, $startLog, $stateFile) {
+    # Run in a background job so watchdog loop continues
+    $scriptBlock = {
+        param($proxyPort, $targetPort, $serviceName, $startScript, $startLog, $stateFile, $W, $watchdogLog)
 
-$cfg = Load-Config
-Log "Idle timeouts: LLM=$($cfg.idleLlm)s ASR=$($cfg.idleAsr)s OCR=$($cfg.idleOcr)s Embed=$($cfg.idleEmbed)s"
+        function LogP($msg) {
+            $ts = Get-Date -Format "HH:mm:ss"
+            Add-Content $watchdogLog "[$ts] [$serviceName] $msg"
+        }
 
-$scriptMap = @{
-    8011 = "$W\asr_service.py"
-    8013 = "$W\ocr_service.py"
-    8014 = "$W\embed_service.py"
+        $listener = $null
+        try {
+            $listener = [System.Net.HttpListener]::new()
+            $listener.Prefixes.Add("http://+:$proxyPort/")
+            $listener.Start()
+            LogP "Wake proxy listening on :$proxyPort"
+
+            while ($listener.IsListening) {
+                $ctx = $null
+                try { $ctx = $listener.GetContext() } catch { break }
+
+                LogP "Wake trigger -> starting $serviceName"
+                $errLog = $startLog -replace "\.log$", "_err.log"
+                Start-Process "python" -ArgumentList $startScript -WindowStyle Hidden `
+                    -RedirectStandardOutput $startLog -RedirectStandardError $errLog
+                "STARTING" | Out-File $stateFile -Encoding UTF8 -NoNewline
+
+                # Wait up to 5 min for service to become ready
+                $ready = $false
+                $elapsed = 0
+                while ($elapsed -lt 300) {
+                    Start-Sleep -s 2; $elapsed += 2
+                    try {
+                        $hReq = [System.Net.HttpWebRequest]::Create("http://localhost:$targetPort/health")
+                        $hReq.Timeout = 3000; $hReq.Method = "GET"
+                        try {
+                            $hResp = $hReq.GetResponse()
+                            $hSr = [System.IO.StreamReader]::new($hResp.GetResponseStream())
+                            $hBody = $hSr.ReadToEnd(); $hSr.Close(); $hResp.Close()
+                            $hSt = ($hBody | ConvertFrom-Json -EA SilentlyContinue).status
+                        } catch [System.Net.WebException] {
+                            $hWr = $_.Exception.Response
+                            if ($hWr) {
+                                $hSr2 = [System.IO.StreamReader]::new($hWr.GetResponseStream())
+                                $hSt = ($hSr2.ReadToEnd() | ConvertFrom-Json -EA SilentlyContinue).status
+                                $hSr2.Close()
+                            } else { $hSt = "down" }
+                        }
+                        if ($hSt -eq "ok") { $ready = $true; break }
+                    } catch {}
+                }
+
+                if ($ready) {
+                    LogP "$serviceName is READY, forwarding request"
+                    "READY" | Out-File $stateFile -Encoding UTF8 -NoNewline
+
+                    # Read original request body
+                    $origBody = $null
+                    try {
+                        $origLen = $ctx.Request.ContentLength64
+                        if ($origLen -gt 0) {
+                            $origBody = [byte[]]::new($origLen)
+                            $ctx.Request.InputStream.Read($origBody, 0, $origLen) | Out-Null
+                        }
+                    } catch {}
+
+                    # Forward to actual service
+                    $fwdUrl = "http://localhost:$targetPort" + $ctx.Request.Url.PathAndQuery
+                    try {
+                        $fwdReq = [System.Net.HttpWebRequest]::Create($fwdUrl)
+                        $fwdReq.Method = $ctx.Request.HttpMethod
+                        $fwdReq.Timeout = 120000
+                        $fwdReq.ContentType = $ctx.Request.ContentType
+                        if ($origBody -and $origBody.Length -gt 0) {
+                            $fwdReq.ContentLength = $origBody.Length
+                            $fwdStream = $fwdReq.GetRequestStream()
+                            $fwdStream.Write($origBody, 0, $origBody.Length)
+                            $fwdStream.Close()
+                        }
+                        try {
+                            $fwdResp = $fwdReq.GetResponse()
+                            $fwdSr = [System.IO.StreamReader]::new($fwdResp.GetResponseStream())
+                            $fwdBody = [System.Text.Encoding]::UTF8.GetBytes($fwdSr.ReadToEnd())
+                            $fwdSr.Close(); $fwdResp.Close()
+                            $ctx.Response.StatusCode = 200
+                            $ctx.Response.ContentType = "application/json"
+                            $ctx.Response.ContentLength64 = $fwdBody.Length
+                            $ctx.Response.OutputStream.Write($fwdBody, 0, $fwdBody.Length)
+                        } catch [System.Net.WebException] {
+                            $fwdWr = $_.Exception.Response
+                            $fwdCode = if ($fwdWr) { [int]$fwdWr.StatusCode } else { 503 }
+                            $fwdErrBytes = [System.Text.Encoding]::UTF8.GetBytes('{"error":"service error"}')
+                            $ctx.Response.StatusCode = $fwdCode
+                            $ctx.Response.ContentLength64 = $fwdErrBytes.Length
+                            $ctx.Response.OutputStream.Write($fwdErrBytes, 0, $fwdErrBytes.Length)
+                        }
+                    } catch {
+                        $errBytes = [System.Text.Encoding]::UTF8.GetBytes('{"error":"forward error"}')
+                        $ctx.Response.StatusCode = 500
+                        $ctx.Response.ContentLength64 = $errBytes.Length
+                        $ctx.Response.OutputStream.Write($errBytes, 0, $errBytes.Length)
+                    }
+                } else {
+                    LogP "$serviceName failed to start in time"
+                    "STOPPED" | Out-File $stateFile -Encoding UTF8 -NoNewline
+                    $errBytes = [System.Text.Encoding]::UTF8.GetBytes('{"error":"service failed to start"}')
+                    $ctx.Response.StatusCode = 503
+                    $ctx.Response.ContentLength64 = $errBytes.Length
+                    $ctx.Response.OutputStream.Write($errBytes, 0, $errBytes.Length)
+                }
+
+                try { $ctx.Response.OutputStream.Close() } catch {}
+
+                # Stop proxy - watchdog will create new one next time service goes idle
+                $listener.Stop()
+                break
+            }
+        } catch {
+            LogP ("Wake proxy error: " + $_.Exception.Message)
+        } finally {
+            if ($listener -and $listener.IsListening) { try { $listener.Stop() } catch {} }
+        }
+    }
+
+    Start-Job -ScriptBlock $scriptBlock -ArgumentList @(
+        $proxyPort, $targetPort, $serviceName, $startScript, $startLog, $stateFile, $W, $watchdogLog
+    ) | Out-Null
 }
-$nameMap = @{
-    8010 = "LLM"
-    8011 = "ASR"
-    8013 = "OCR"
-    8014 = "Embedding"
+
+# =============================================================================
+# SERVICE DEFINITIONS
+# =============================================================================
+$services = [ordered]@{}
+$services[8010] = @{
+    name      = "LLM"
+    idleTime  = $IDLE_LLM
+    type      = "llm"
+    lastSeen  = [datetime]::Now
+    wasUp     = $false
+    failCount = 0
+    proxyPort = $null
 }
-$idleMap = @{
-    8010 = $cfg.idleLlm
-    8011 = $cfg.idleAsr
-    8013 = $cfg.idleOcr
-    8014 = $cfg.idleEmbed
+if ($launchOcr) {
+    $services[8013] = @{
+        name      = "OCR"
+        idleTime  = $IDLE_OCR
+        type      = "python"
+        script    = "$W\ocr_service.py"
+        log       = "$W\ocr.log"
+        state     = "$W\state_8013.txt"
+        lastSeen  = [datetime]::Now
+        wasUp     = $false
+        failCount = 0
+        proxyPort = $null
+    }
+}
+if ($launchEmbed) {
+    $services[8014] = @{
+        name      = "Embedding"
+        idleTime  = $IDLE_EMBED
+        type      = "python"
+        script    = "$W\embed_service.py"
+        log       = "$W\embed.log"
+        state     = "$W\state_8014.txt"
+        lastSeen  = [datetime]::Now
+        wasUp     = $false
+        failCount = 0
+        proxyPort = $null
+    }
+}
+if ($launchAsr) {
+    $services[8011] = @{
+        name      = "ASR"
+        idleTime  = $IDLE_ASR
+        type      = "python"
+        script    = "$W\asr_service.py"
+        log       = "$W\asr.log"
+        state     = "$W\state_8011.txt"
+        lastSeen  = [datetime]::Now
+        wasUp     = $false
+        failCount = 0
+        proxyPort = $null
+    }
 }
 
-$svcPorts = @(8010)
-if ($cfg.launchAsr)   { $svcPorts += 8011 }
-if ($cfg.launchOcr)   { $svcPorts += 8013 }
-if ($cfg.launchEmbed) { $svcPorts += 8014 }
+# Wake proxy ports: service port -> proxy port (offset +40)
+$wakeProxyMap = @{ 8010 = 8050; 8011 = 8051; 8013 = 8053; 8014 = 8054 }
 
-$state      = @{}
-$failCount  = @{}
-$wasUp      = @{}
-$lastSeen   = @{}
-$serverLog  = "$W\server.log"
-
-foreach ($port in $svcPorts) {
-    $state[$port]     = "READY"
-    $failCount[$port] = 0
-    $wasUp[$port]     = $false
-    $lastSeen[$port]  = (Get-Date)
-}
-
-$loopCount = 0
-
+# =============================================================================
+# MAIN LOOP
+# =============================================================================
 while ($true) {
     Start-Sleep -s 10
-    $loopCount++
 
-    # Reload config every 5 min
-    if ($loopCount % 30 -eq 0) {
-        $cfg = Load-Config
-        $idleMap[8010] = $cfg.idleLlm
-        $idleMap[8011] = $cfg.idleAsr
-        $idleMap[8013] = $cfg.idleOcr
-        $idleMap[8014] = $cfg.idleEmbed
-    }
+    # Clean up finished jobs to avoid accumulation
+    Get-Job -State Completed -EA SilentlyContinue | Remove-Job -EA SilentlyContinue
 
-    foreach ($port in $svcPorts) {
-        $cur   = $state[$port]
-        $idle  = $idleMap[$port]
-        $name  = $nameMap[$port]
+    foreach ($port in @($services.Keys)) {
+        $svc = $services[$port]
+        $st = Get-ServiceStatus $port
 
-        # ── STOPPED: watch for wake trigger (created by wake proxy or manually) ──
-        if ($cur -eq "STOPPED") {
-            $trigger = "$W\wake_$port.trigger"
-            if (Test-Path $trigger) {
-                Remove-Item $trigger -ErrorAction SilentlyContinue
-                Log "[$port] Wake trigger → starting $name"
+        if ($st -eq "ok" -or $st -eq "loading model" -or $st -eq "loading") {
+            if (-not $svc.wasUp) { Log ("[" + $svc.name + "] UP") }
+            $svc.wasUp = $true
+            $svc.failCount = 0
+            $svc.lastSeen = [datetime]::Now
+            $svc.proxyPort = $null
 
-                # Stop wake proxy first so it frees the port
-                Stop-WakeProxy $port
-                Start-Sleep -s 2
-
-                Set-State $port "LOADING"
-                $state[$port] = "LOADING"
-
-                if ($port -eq 8010) {
-                    $ok = Start-LLMServer
-                } else {
-                    $ok = Start-SpecialSvc $scriptMap[$port] $port
-                }
-
-                if ($ok) {
-                    $state[$port]    = "READY"
-                    $failCount[$port] = 0
-                    $lastSeen[$port] = (Get-Date)
-                    $wasUp[$port]    = $false
-                    Set-State $port "READY"
-                    Log "[$port] $name is READY"
-                } else {
-                    $state[$port] = "STOPPED"
-                    Set-State $port "STOPPED"
-                    Log "[$port] $name failed to start after wake trigger"
-                    Start-WakeProxy $port $name
-                }
-            }
+            # Check idle timeout - unload if idle too long
+            $idleSec = ([datetime]::Now - $svc.lastSeen).TotalSeconds
+            # (lastSeen is updated by the service itself via last_req; we just track uptime here)
             continue
         }
 
-        # ── LOADING: wait for healthy ──
-        if ($cur -eq "LOADING") {
-            $h = Test-Port $port
-            if ($h -eq "ok" -or $h -eq "loading model") {
-                $state[$port]    = "READY"
-                $failCount[$port] = 0
-                $lastSeen[$port] = (Get-Date)
-                $wasUp[$port]    = $true
-                Set-State $port "READY"
-                Log "[$port] $name READY"
-            }
-            continue
-        }
+        if (-not $svc.wasUp) { continue }  # never came up, skip
 
-        # ── READY: health check + idle detection ──
-        $h = Test-Port $port
+        # Service went down
+        $svc.failCount++
+        $svc.wasUp = $false
 
-        if ($h -eq "ok" -or $h -eq "loading model" -or $h -eq "loading") {
-            if (!$wasUp[$port]) {
-                if ($h -eq "ok") { Log "[$port] $name UP" }
-                # "loading" = model still loading, don't log every cycle
-            }
-            if ($h -eq "ok") { $wasUp[$port] = $true }
-            $failCount[$port] = 0
-            $lastSeen[$port] = (Get-Date)
-
-            # Idle check for LLM: server.log last-write time is accurate
-            if ($port -eq 8010 -and (Test-Path $serverLog)) {
-                $idleSec = ((Get-Date) - (Get-Item $serverLog).LastWriteTime).TotalSeconds
-                if ($idleSec -gt $idle) {
-                    Log "[8010] LLM idle $([int]$idleSec)s > $idle s → unloading"
-                    Stop-LLMServer
-                    $state[8010]    = "STOPPED"
-                    Set-State 8010 "STOPPED"
-                    Log "[8010] LLM STOPPED. Starting wake proxy on port 8010..."
-                    Start-WakeProxy 8010 "LLM"
+        if ($svc.type -eq "llm") {
+            Log ("[" + $svc.name + "] DOWN (fail " + $svc.failCount + ") - restarting")
+            Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -EA SilentlyContinue
+            Start-Sleep -s 2
+            if (Test-Path "$W\run.ps1") {
+                if ($svc.failCount -ge 4) {
+                    $ctx2 = 8192
+                    if ((Get-Content "$W\run.ps1" -Raw) -match "--ctx-size (\d+)") { $ctx2 = [int]$Matches[1] }
+                    $newCtx2 = $ctx2; $steps = @(32768,16384,8192,4096,2048)
+                    foreach ($s2 in $steps) { if ($s2 -lt $ctx2) { $newCtx2 = $s2; break } }
+                    Log ("[LLM] Reducing ctx: " + $ctx2 + " -> " + $newCtx2)
+                    $rc = Get-Content "$W\run.ps1" -Raw
+                    $rc = $rc -replace "--ctx-size \d+", "--ctx-size $newCtx2"
+                    [System.IO.File]::WriteAllText("$W\run.ps1", $rc, [System.Text.UTF8Encoding]::new($false))
+                    $svc.failCount = 0
                 }
+                Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\run.ps1"
+                Log "[LLM] Restart issued"
             }
-            continue
-        }
+        } else {
+            # Python service went idle or crashed - set STOPPED, start wake proxy
+            Log ("[" + $svc.name + "] stopped -> STOPPED, starting wake proxy on :" + $wakeProxyMap[$port])
+            "STOPPED" | Out-File $svc.state -Encoding UTF8 -NoNewline
 
-        # ── Health failed ──
-        $failCount[$port]++
+            $proxyPort = $wakeProxyMap[$port]
 
-        # Special services: only log and kill after 3 consecutive failures
-        # (avoids false STOPPED during slow model loading or brief hiccup)
-        if ($port -ne 8010) {
-            if ($failCount[$port] -ge 3 -and $wasUp[$port]) {
-                Log "[$port] $name stopped (idle or crash) → STOPPED"
-                $state[$port]    = "STOPPED"
-                $failCount[$port] = 0
-                $wasUp[$port]    = $false
-                Set-State $port "STOPPED"
-                Start-WakeProxy $port $name
-            } elseif ($failCount[$port] -ge 5) {
-                # Never came up at all after 5 tries (~50s) — give up waiting
-                Log "[$port] $name never became healthy → STOPPED"
-                $state[$port]    = "STOPPED"
-                $failCount[$port] = 0
-                Set-State $port "STOPPED"
-                Start-WakeProxy $port $name
-            }
-            continue
-        }
+            # Kill anything on proxy port first
+            try {
+                $conn2 = Get-NetTCPConnection -LocalPort $proxyPort -EA SilentlyContinue | Where-Object State -eq "Listen" | Select-Object -First 1
+                if ($conn2 -and $conn2.OwningProcess -gt 4) { Stop-Process -Id $conn2.OwningProcess -Force -EA SilentlyContinue }
+            } catch {}
+            Start-Sleep -s 1
 
-        # LLM crash recovery
-        if ($failCount[$port] -ge 2) {
-            Log "[8010] LLM crash → restarting"
-            Stop-LLMServer
-
-            if ($failCount[$port] -ge 4) {
-                $ctx = Get-CurrentCtx
-                if ($ctx -gt 2048) {
-                    $newCtx = Reduce-Ctx $ctx
-                    Log "[8010] Reducing ctx $ctx → $newCtx"
-                    Update-CtxInRunScript $newCtx
-                    $failCount[$port] = 0
-                }
-            }
-
-            $ok = Start-LLMServer
-            if ($ok) {
-                $state[$port] = "LOADING"
-                $wasUp[$port] = $false
-                Set-State $port "LOADING"
-                Log "[8010] Restart issued, waiting..."
-                Start-Sleep -s 20
-            }
+            Start-WakeProxy $proxyPort $port $svc.name $svc.script $svc.log $svc.state
+            $svc.proxyPort = $proxyPort
+            Log ("[" + $svc.name + "] Wake proxy started :" + $proxyPort + " -> :" + $port)
         }
     }
 }
