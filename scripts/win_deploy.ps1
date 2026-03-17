@@ -557,13 +557,16 @@ function Invoke-Deploy {
     Get-Process | Where-Object { $_.Name -match "llama" } | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -s 1
     New-Item -ItemType Directory -Path "$W\models" -Force | Out-Null
-    # Reset torch/torchvision stamps if they point to cu124 - force upgrade to cu128 (RTX 5060 CC12.0 requires CUDA 12.8)
-    if ((Get-Stamp "torch_cuda") -eq "cu124")       { Remove-Item "$W\stamp_torch_cuda.txt"       -ErrorAction SilentlyContinue }
-    if ((Get-Stamp "torchvision_cuda") -eq "cu124") { Remove-Item "$W\stamp_torchvision_cuda.txt" -ErrorAction SilentlyContinue }
-    if ((Get-Stamp "surya_cache") -ne "") {
-        # Also reset surya model cache stamp to force re-download with new torch
-        Remove-Item "$W\stamp_surya_cache.txt" -ErrorAction SilentlyContinue
+    # Reset torch/torchvision stamps if they point to cu124 - force upgrade to cu128 (RTX 5060 CC12.0)
+    if ((Get-Stamp "torch_cuda") -eq "cu124")       { Remove-Item "$W\stamp_torch_cuda.txt"       -EA SilentlyContinue; Write-Host "  Migrating torch cu124->cu128..." -ForegroundColor Yellow }
+    if ((Get-Stamp "torchvision_cuda") -eq "cu124") { Remove-Item "$W\stamp_torchvision_cuda.txt" -EA SilentlyContinue }
+    # Reset transformers stamp if pinned to 4.44.x - surya-ocr requires >=4.56.1
+    $tfStampNow = Get-Stamp "pkg_transformers"
+    if ($tfStampNow -match "^4\.4[0-4]") {
+        Remove-Item "$W\stamp_pkg_transformers.txt" -EA SilentlyContinue
+        Write-Host "  Resetting transformers stamp (4.44->latest for surya compat)..." -ForegroundColor Yellow
     }
+    if ((Get-Stamp "surya_cache") -ne "") { Remove-Item "$W\stamp_surya_cache.txt" -EA SilentlyContinue }
     $tag = "b5248"
 
     # [1] System deps
@@ -905,12 +908,13 @@ function Invoke-Deploy {
     # ---- Phase 4: wait for all services in parallel ----
     if ($svcPorts.Count -gt 0) {
         Write-Host "  Waiting for services to become ready..." -ForegroundColor Yellow
-        $pending = [System.Collections.Generic.HashSet[int]]::new($svcPorts.Keys)
+        $pendingPorts = [System.Collections.ArrayList]::new()
+        foreach ($k in $svcPorts.Keys) { $pendingPorts.Add($k) | Out-Null }
         $elapsed4 = 0
-        while ($pending.Count -gt 0 -and $elapsed4 -lt 300) {
+        while ($pendingPorts.Count -gt 0 -and $elapsed4 -lt 300) {
             Start-Sleep -s 3; $elapsed4 += 3
-            $done = @()
-            foreach ($p in $pending) {
+            $done4 = [System.Collections.ArrayList]::new()
+            foreach ($p in @($pendingPorts)) {
                 $st4 = ""
                 try {
                     $rq = [System.Net.HttpWebRequest]::Create("http://localhost:$p/health")
@@ -922,20 +926,24 @@ function Invoke-Deploy {
                         $sr5.Close(); $rp.Close()
                     } catch [System.Net.WebException] {
                         $wr2 = $_.Exception.Response
-                        if ($wr2) { $sr6 = [System.IO.StreamReader]::new($wr2.GetResponseStream()); $st4 = ($sr6.ReadToEnd() | ConvertFrom-Json -EA SilentlyContinue).status; $sr6.Close() }
+                        if ($wr2) {
+                            $sr6 = [System.IO.StreamReader]::new($wr2.GetResponseStream())
+                            $st4 = ($sr6.ReadToEnd() | ConvertFrom-Json -EA SilentlyContinue).status
+                            $sr6.Close()
+                        }
                     }
                 } catch {}
                 if ($st4 -eq "ok") {
                     Write-Host ("  [{0}] ready ({1}s)" -f $svcPorts[$p], $elapsed4) -ForegroundColor Green
-                    $done += $p
+                    $done4.Add($p) | Out-Null
                 } elseif ($st4 -and $st4 -ne "loading") {
                     Write-Host ("  [{0}] status: {1}" -f $svcPorts[$p], $st4) -ForegroundColor Yellow
-                    $done += $p
+                    $done4.Add($p) | Out-Null
                 }
             }
-            foreach ($p in $done) { $pending.Remove($p) | Out-Null }
-            if ($pending.Count -gt 0 -and $elapsed4 % 30 -eq 0) {
-                $names = ($pending | ForEach-Object { $svcPorts[$_] }) -join ", "
+            foreach ($p in @($done4)) { $pendingPorts.Remove($p) | Out-Null }
+            if ($pendingPorts.Count -gt 0 -and $elapsed4 % 30 -eq 0) {
+                $names = ($pendingPorts | ForEach-Object { $svcPorts[$_] }) -join ", "
                 Write-Host ("  Still loading: {0} ({1}s)" -f $names, $elapsed4) -ForegroundColor Gray
             }
         }
