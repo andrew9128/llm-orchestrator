@@ -138,31 +138,13 @@ function Install-Pkg($pkgId, $label) {
 
 function Download-File($url, $dest, $label) {
     Remove-Item $dest -EA SilentlyContinue
-    try {
-        $wc = [System.Net.WebClient]::new()
-        $wc.Headers["User-Agent"] = "Mozilla/5.0"
-        $last = [ref]0
-        $lastPct = [ref]-1
-        Register-ObjectEvent $wc DownloadProgressChanged -Action {
-            $pct = $EventArgs.ProgressPercentage
-            $mb  = [math]::Round($EventArgs.BytesReceived / 1MB, 1)
-            if ($pct -ne $lastPct.Value -and ($pct % 5 -eq 0 -or $pct -eq 100)) {
-                Write-Host ("`r  $label  $pct%  ($mb MB)   ") -NoNewline
-                $lastPct.Value = $pct
-            }
-        } | Out-Null
-        $done = [System.Threading.ManualResetEventSlim]::new($false)
-        Register-ObjectEvent $wc DownloadFileCompleted -Action { $done.Set() } | Out-Null
-        $wc.DownloadFileAsync([uri]$url, $dest)
-        $done.Wait()
-        $wc.Dispose()
-        Write-Host ""
-        if ((Test-Path $dest) -and (Get-Item $dest).Length -gt 1KB) { return $true }
-    } catch {
-        Write-Host ""
-        Write-Host "  WARNING: download error - $_" -ForegroundColor Yellow
+    Write-Host "  Downloading $label..." -ForegroundColor Cyan
+    & curl.exe -L --retry 3 --retry-delay 5 "$url" -o "$dest"
+    if ((Test-Path $dest) -and (Get-Item $dest).Length -gt 1KB) { 
+        Write-Host "  OK!" -ForegroundColor Green
+        return $true 
     }
-    Remove-Item $dest -EA SilentlyContinue; return $false
+    return $false
 }
 
 function Download-HF($repo, $filename, $dest, $label) {
@@ -242,8 +224,6 @@ function Select-BestModel($vramMb, $deployMode) {
 # SERVICE SCRIPT WRITERS
 # =============================================================================
 function Write-AsrService {
-    # GigaAM-v3 ONNX via onnx-asr
-    # FIX v15.1: call _model[0](tmp) directly - .transcribe() removed in newer onnx-asr versions
     $lines = @(
         "import sys, json, base64, tempfile, os, time, threading",
         "from http.server import HTTPServer, BaseHTTPRequestHandler",
@@ -253,47 +233,33 @@ function Write-AsrService {
         "def load_model():",
         "    try:",
         "        import onnx_asr",
-        "        providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']",
-        "        _model[0] = onnx_asr.load_model('gigaam-v3-e2e-rnnt', providers=providers)",
+        "        _model[0] = onnx_asr.load_model('gigaam-v3-e2e-rnnt')",
         "        ready[0] = True",
         "    except Exception as e:",
         "        err_msg[0] = str(e)",
-        "        print(f'LOAD_ERROR: {e}', file=sys.stderr, flush=True)",
         "class H(BaseHTTPRequestHandler):",
         "    def log_message(self, f, *a): pass",
         "    def do_GET(self):",
         "        if '/health' in self.path:",
-        "            self.send_response(200 if ready[0] else 503)",
-        "            self.send_header('Content-Type','application/json'); self.end_headers()",
-        "            if ready[0]: st = 'ok'",
-        "            elif err_msg[0]: st = 'error: ' + err_msg[0][:100]",
-        "            else: st = 'loading'",
+        "            st = 'ok' if ready[0] else ('loading' if not err_msg[0] else 'error')",
+        "            self.send_response(200 if ready[0] else 503); self.send_header('Content-Type','application/json'); self.end_headers()",
         "            self.wfile.write(json.dumps({'status': st}).encode())",
         "    def do_POST(self):",
         "        if not ready[0]:",
-        "            self.send_response(503); self.send_header('Content-Type','application/json'); self.end_headers()",
-        "            self.wfile.write(json.dumps({'error': err_msg[0] or 'loading'}).encode()); return",
+        "            self.send_response(503); self.end_headers(); return",
         "        last_req[0] = time.time()",
         "        n = int(self.headers.get('Content-Length', 0))",
-        "        body = json.loads(self.rfile.read(n))",
-        "        audio = base64.b64decode(body.get('audio', ''))",
+        "        audio = base64.b64decode(json.loads(self.rfile.read(n)).get('audio', ''))",
         "        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:",
         "            f.write(audio); tmp = f.name",
         "        try:",
-        "            result = _model[0](tmp)",
-        "            if hasattr(result, 'text'): text = result.text",
-        "            elif hasattr(result, 'texts'): text = ' '.join(result.texts)",
-        "            elif isinstance(result, (list, tuple)): text = ' '.join(str(x) for x in result)",
-        "            else: text = str(result)",
+        "            # FIX v15.1: Вызов модели напрямую вместо .transcribe()",
+        "            res = _model[0](tmp)",
+        "            text = res.text if hasattr(res, 'text') else str(res)",
         "        except Exception as e: text = 'ERROR: ' + str(e)",
         "        finally: os.unlink(tmp)",
         "        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
         "        self.wfile.write(json.dumps({'text': text}).encode())",
-        "def watcher():",
-        "    while True:",
-        "        time.sleep(30)",
-        "        if ready[0] and time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)",
-        "threading.Thread(target=watcher, daemon=True).start()",
         "threading.Thread(target=load_model, daemon=True).start()",
         "HTTPServer(('0.0.0.0', 18011), H).serve_forever()"
     )
