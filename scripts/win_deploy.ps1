@@ -195,46 +195,37 @@ function Get-CtxSize($vramMb) {
 }
 
 function Select-BestModel($vramMb, $deployMode) {
-    # Code mode: Kodify-Nano
     if ($deployMode -eq "code") {
         return [PSCustomObject]@{ name="kodify-2b-q8"; file="kodify-2b-q8.gguf"; minVram=3000
             url="https://huggingface.co/mradermacher/Kodify-Nano-2.0-GGUF/resolve/main/Kodify-Nano-2.0.Q8_0.gguf" }
     }
-    # Reserve VRAM for special services (ONNX - minimal GPU usage)
     $specialMb = 0
     if ($deployMode -eq "voice") { $specialMb = 700  }
-    if ($deployMode -eq "doc")   { $specialMb = 100  }  # rapidocr = CPU, bge-m3 = CPU
-    if ($deployMode -eq "full")  { $specialMb = 700  }  # only ASR on GPU
+    if ($deployMode -eq "doc")   { $specialMb = 100  }
+    if ($deployMode -eq "full")  { $specialMb = 700  }
     $budget = $vramMb - 1200 - $specialMb
 
     $catalog = @(
-        # T-lite-it-2.1 (Qwen3 arch, best Russian 2025-2026)
         [PSCustomObject]@{ name="t-lite-2.1-q8";  file="t-lite-2.1-q8.gguf";  minVram=10000; url="https://huggingface.co/t-tech/T-lite-it-2.1-GGUF/resolve/main/T-lite-it-2.1-Q8_0.gguf" }
         [PSCustomObject]@{ name="t-lite-2.1-q6";  file="t-lite-2.1-q6.gguf";  minVram=8200;  url="https://huggingface.co/t-tech/T-lite-it-2.1-GGUF/resolve/main/T-lite-it-2.1-Q6_K.gguf" }
         [PSCustomObject]@{ name="t-lite-2.1-q5";  file="t-lite-2.1-q5.gguf";  minVram=6500;  url="https://huggingface.co/t-tech/T-lite-it-2.1-GGUF/resolve/main/T-lite-it-2.1-Q5_K_M.gguf" }
         [PSCustomObject]@{ name="t-lite-2.1-q4";  file="t-lite-2.1-q4.gguf";  minVram=5200;  url="https://huggingface.co/t-tech/T-lite-it-2.1-GGUF/resolve/main/T-lite-it-2.1-Q4_K_M.gguf" }
-        # T-pro 32B
         [PSCustomObject]@{ name="t-pro-2.0-q8";   file="t-pro-2.0-q8.gguf";   minVram=36000; url="https://huggingface.co/t-tech/T-pro-it-2.0-GGUF/resolve/main/T-pro-it-2.0-Q8_0.gguf" }
         [PSCustomObject]@{ name="t-pro-2.0-q6";   file="t-pro-2.0-q6.gguf";   minVram=27000; url="https://huggingface.co/t-tech/T-pro-it-2.0-GGUF/resolve/main/T-pro-it-2.0-Q6_K.gguf" }
         [PSCustomObject]@{ name="t-pro-2.0-q5";   file="t-pro-2.0-q5.gguf";   minVram=23000; url="https://huggingface.co/t-tech/T-pro-it-2.0-GGUF/resolve/main/T-pro-it-2.0-Q5_K_M.gguf" }
         [PSCustomObject]@{ name="t-pro-2.0-q4";   file="t-pro-2.0-q4.gguf";   minVram=19000; url="https://huggingface.co/t-tech/T-pro-it-2.0-GGUF/resolve/main/T-pro-it-2.0-Q4_K_M.gguf" }
-        # Saiga Gemma3 12B
         [PSCustomObject]@{ name="saiga-gem12-q8";  file="saiga-gem12-q8.gguf";  minVram=14500; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q8_0.gguf" }
         [PSCustomObject]@{ name="saiga-gem12-q6";  file="saiga-gem12-q6.gguf";  minVram=11000; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q6_K.gguf" }
         [PSCustomObject]@{ name="saiga-gem12-q5";  file="saiga-gem12-q5.gguf";  minVram=9500;  url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q5_K_M.gguf" }
         [PSCustomObject]@{ name="saiga-gem12-q4";  file="saiga-gem12-q4.gguf";  minVram=7800;  url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q4_K_M.gguf" }
-        # Saiga Nemo 12B
         [PSCustomObject]@{ name="saiga-nem12-q6";  file="saiga-nem12-q6.gguf";  minVram=11000; url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q6_K.gguf" }
         [PSCustomObject]@{ name="saiga-nem12-q5";  file="saiga-nem12-q5.gguf";  minVram=9500;  url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q5_K_M.gguf" }
         [PSCustomObject]@{ name="saiga-nem12-q4";  file="saiga-nem12-q4.gguf";  minVram=7800;  url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q4_K_M.gguf" }
-        # YandexGPT 8B
         [PSCustomObject]@{ name="yagpt-8b-q8";     file="yagpt-8b-q8.gguf";     minVram=10000; url="https://huggingface.co/yandex/YandexGPT-5-Lite-8B-GGUF/resolve/main/YandexGPT-5-Lite-8B-instruct-Q8_0.gguf" }
         [PSCustomObject]@{ name="yagpt-8b-q4";     file="yagpt-8b-q4.gguf";     minVram=5200;  url="https://huggingface.co/yandex/YandexGPT-5-Lite-8B-GGUF/resolve/main/YandexGPT-5-Lite-8B-instruct-Q4_K_M.gguf" }
-        # QVikhr 4B (compact Russian)
         [PSCustomObject]@{ name="qvikhr-4b-q8";    file="qvikhr-4b-q8.gguf";    minVram=5200;  url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q8_0.gguf" }
         [PSCustomObject]@{ name="qvikhr-4b-q5";    file="qvikhr-4b-q5.gguf";    minVram=4000;  url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q5_0.gguf" }
         [PSCustomObject]@{ name="qvikhr-4b-q4";    file="qvikhr-4b-q4.gguf";    minVram=3400;  url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q4_K_M.gguf" }
-        # Fallback
         [PSCustomObject]@{ name="qvikhr-1b-q8";    file="qvikhr-1b-q8.gguf";    minVram=2200;  url="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruction-GGUF/resolve/main/QVikhr-3-1.7B-Instruction-Q8_0.gguf" }
         [PSCustomObject]@{ name="qvikhr-1b-q4";    file="qvikhr-1b-q4.gguf";    minVram=1800;  url="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruction-GGUF/resolve/main/QVikhr-3-1.7B-Instruction-Q4_K_M.gguf" }
     )
@@ -251,8 +242,8 @@ function Select-BestModel($vramMb, $deployMode) {
 # SERVICE SCRIPT WRITERS
 # =============================================================================
 function Write-AsrService {
-    # GigaAM-v3 ONNX via onnx-asr - no torch required
-    $asrDir = "$W\models\gigaam_onnx"
+    # GigaAM-v3 ONNX via onnx-asr
+    # FIX v15.1: call _model[0](tmp) directly - .transcribe() removed in newer onnx-asr versions
     $lines = @(
         "import sys, json, base64, tempfile, os, time, threading",
         "from http.server import HTTPServer, BaseHTTPRequestHandler",
@@ -289,8 +280,11 @@ function Write-AsrService {
         "        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:",
         "            f.write(audio); tmp = f.name",
         "        try:",
-        "            result = _model[0].transcribe(tmp)",
-        "            text = result if isinstance(result, str) else str(result)",
+        "            result = _model[0](tmp)",
+        "            if hasattr(result, 'text'): text = result.text",
+        "            elif hasattr(result, 'texts'): text = ' '.join(result.texts)",
+        "            elif isinstance(result, (list, tuple)): text = ' '.join(str(x) for x in result)",
+        "            else: text = str(result)",
         "        except Exception as e: text = 'ERROR: ' + str(e)",
         "        finally: os.unlink(tmp)",
         "        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
@@ -478,9 +472,6 @@ function Wait-ServiceReady($port, $label, $timeoutSec) {
     Write-Host "  [$label] timed out after ${timeoutSec}s" -ForegroundColor Red
     return $false
 }
-
-
-
 
 function Write-ProxyScript {
     $lines = @(
@@ -819,7 +810,6 @@ function Invoke-Deploy {
     if ($launchAsr -or $launchOcr -or $launchEmbed) {
         Write-Host "[6/8] ONNX packages..." -ForegroundColor Yellow
 
-        # onnxruntime-gpu (shared base for all ONNX services)
         $orVer = Pip-Install "onnxruntime-gpu" "onnxruntime_gpu"
         if (-not $orVer) {
             Write-Host "  onnxruntime-gpu failed, trying CPU fallback..." -ForegroundColor Yellow
@@ -846,14 +836,10 @@ function Invoke-Deploy {
     if ($launchAsr -or $launchOcr -or $launchEmbed) {
         Write-Host "[7/8] ONNX model files..." -ForegroundColor Yellow
 
-        # GigaAM-v3 ONNX - onnx-asr downloads automatically on first run
-        # but we pre-download to avoid timeout on first request
         if ($launchAsr) {
-            $gigaamDir = "$env:USERPROFILE\.cache\huggingface\hub"
             $gigaamStamp = Get-Stamp "gigaam_v3_onnx"
             if ($gigaamStamp -ne "ok") {
                 Write-Host "  Pre-downloading GigaAM-v3 ONNX models..." -ForegroundColor Yellow
-                # Trigger download via onnx-asr (runs in background, will be ready when service starts)
                 $dlScript = "import onnx_asr; onnx_asr.load_model('gigaam-v3-e2e-rnnt', providers=['CPUExecutionProvider']); print('ok')"
                 $result = & python -c $dlScript 2>&1
                 if ($result -match "ok") {
@@ -867,12 +853,10 @@ function Invoke-Deploy {
             }
         }
 
-        # rapidocr auto-downloads ESLAV/Russian models on first use
         if ($launchOcr) {
             Write-Host "  OCR: rapidocr will auto-download Russian models on first request" -ForegroundColor Green
         }
 
-        # BGE-M3 ONNX - sentence-transformers handles download/export automatically on first load
         if ($launchEmbed) {
             Write-Host "  BGE-M3 ONNX: will load on first request (auto-download)" -ForegroundColor Green
         }
@@ -885,7 +869,6 @@ function Invoke-Deploy {
     # ------------------------------------------------------------------
     Write-Host "[8/8] Starting services..." -ForegroundColor Yellow
 
-    # Save config for watchdog
     $cfgObj = [PSCustomObject]@{
         mode        = $Mode
         idleLlm     = $IDLE_LLM; idleAsr = $IDLE_ASR; idleOcr = $IDLE_OCR; idleEmbed = $IDLE_EMBED
@@ -976,9 +959,7 @@ function Invoke-Deploy {
         }
     }
 
-    # Start proxy processes directly (Python, no PS runspace needed)
-    # Proxies forward requests to internal services, start services on demand
-    # Write proxy script and start proxy processes
+    # Start proxy processes
     Write-ProxyScript
     $proxyScript = "$W\proxy_service.py"
     if ($launchAsr) {
@@ -994,7 +975,7 @@ function Invoke-Deploy {
             -WindowStyle Hidden -RedirectStandardOutput "$W\proxy_8014.log" -RedirectStandardError "$W\proxy_8014_err.log"
     }
 
-    # Minimal watchdog: only monitors LLM restarts + logs proxy status
+    # Minimal watchdog: only monitors LLM restarts
     $wdScript = "$W\watchdog.ps1"
     Write-LlmWatchdog $wdScript
     Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-ExecutionPolicy", "Bypass", "-File", $wdScript
