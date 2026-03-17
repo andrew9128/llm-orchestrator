@@ -137,11 +137,31 @@ function Install-Pkg($pkgId, $label) {
 }
 
 function Download-File($url, $dest, $label) {
-    Write-Host "  Downloading $label..." -ForegroundColor Gray
     Remove-Item $dest -EA SilentlyContinue
-    curl.exe -L --retry 3 --retry-delay 5 --retry-connrefused --max-time 3600 `
-        -H "User-Agent: Mozilla/5.0" $url -o $dest 2>&1 | Out-Null
-    if ((Test-Path $dest) -and (Get-Item $dest).Length -gt 1KB) { return $true }
+    try {
+        $wc = [System.Net.WebClient]::new()
+        $wc.Headers["User-Agent"] = "Mozilla/5.0"
+        $last = [ref]0
+        $lastPct = [ref]-1
+        Register-ObjectEvent $wc DownloadProgressChanged -Action {
+            $pct = $EventArgs.ProgressPercentage
+            $mb  = [math]::Round($EventArgs.BytesReceived / 1MB, 1)
+            if ($pct -ne $lastPct.Value -and ($pct % 5 -eq 0 -or $pct -eq 100)) {
+                Write-Host ("`r  $label  $pct%  ($mb MB)   ") -NoNewline
+                $lastPct.Value = $pct
+            }
+        } | Out-Null
+        $done = [System.Threading.ManualResetEventSlim]::new($false)
+        Register-ObjectEvent $wc DownloadFileCompleted -Action { $done.Set() } | Out-Null
+        $wc.DownloadFileAsync([uri]$url, $dest)
+        $done.Wait()
+        $wc.Dispose()
+        Write-Host ""
+        if ((Test-Path $dest) -and (Get-Item $dest).Length -gt 1KB) { return $true }
+    } catch {
+        Write-Host ""
+        Write-Host "  WARNING: download error - $_" -ForegroundColor Yellow
+    }
     Remove-Item $dest -EA SilentlyContinue; return $false
 }
 
@@ -707,7 +727,7 @@ function Invoke-Deploy {
         if (Test-Path "$W\bin") { Remove-Item -Recurse -Force "$W\bin" -EA SilentlyContinue }
         New-Item -ItemType Directory -Path "$W\bin" -Force | Out-Null
         Write-Host "  Downloading llama.cpp $tag (CUDA 12.4 build)..." -ForegroundColor Yellow
-        curl.exe -L "https://github.com/ggerganov/llama.cpp/releases/download/$tag/llama-$tag-bin-win-cuda-cu12.4-x64.zip" -o "$W\engine.zip"
+        Download-File "https://github.com/ggerganov/llama.cpp/releases/download/$tag/llama-$tag-bin-win-cuda-cu12.4-x64.zip" "$W\engine.zip" "llama.cpp CUDA" | Out-Null
         Expand-Archive "$W\engine.zip" "$W\bin" -Force
         Remove-Item "$W\engine.zip" -EA SilentlyContinue
         $exePath = Get-ChildItem "$W\bin" -Recurse -Filter "llama-server.exe" | Select-Object -First 1 -ExpandProperty FullName
@@ -725,7 +745,7 @@ function Invoke-Deploy {
     if ($p.ExitCode -ne 0) {
         Write-Host "  CUDA test failed - trying Vulkan fallback..." -ForegroundColor Yellow
         if (-not (Test-Path "$W\bin_vulkan\llama-server.exe")) {
-            curl.exe -L "https://github.com/ggerganov/llama.cpp/releases/download/$tag/llama-$tag-bin-win-vulkan-x64.zip" -o "$W\vk.zip"
+            Download-File "https://github.com/ggerganov/llama.cpp/releases/download/$tag/llama-$tag-bin-win-vulkan-x64.zip" "$W\vk.zip" "llama.cpp Vulkan" | Out-Null
             New-Item -ItemType Directory -Path "$W\bin_vulkan" -Force | Out-Null
             Expand-Archive "$W\vk.zip" "$W\bin_vulkan" -Force
             Remove-Item "$W\vk.zip" -EA SilentlyContinue
@@ -780,12 +800,12 @@ function Invoke-Deploy {
     } else {
         Write-Host "  Downloading $($candidate.name)..." -ForegroundColor Yellow
         if ($candidate.url -notmatch "\?") { $dlUrl = "$($candidate.url)?download=true" } else { $dlUrl = $candidate.url }
-        curl.exe -L --retry 3 --max-time 3600 -H "User-Agent: Mozilla/5.0" $dlUrl -o $m
+        Download-File $dlUrl $m $($candidate.name) | Out-Null
         if (-not (Test-Path $m) -or (Get-Item $m).Length -lt 100MB) {
             Remove-Item $m -EA SilentlyContinue
             Write-Host "  Download failed - trying emergency fallback..." -ForegroundColor Red
             $m = "$W\models\qvikhr-4b-q4.gguf"
-            curl.exe -L "https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q4_K_M.gguf?download=true" -o $m
+            Download-File "https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q4_K_M.gguf?download=true" $m "qvikhr-4b-q4 (emergency)" | Out-Null
             if (-not (Test-Path $m) -or (Get-Item $m).Length -lt 100MB) {
                 Write-Host "FAILED: cannot download model." -ForegroundColor Red; exit 1
             }
