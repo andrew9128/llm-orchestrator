@@ -107,7 +107,7 @@ function Fwd($ctx){
 }
 
 $listener=[System.Net.HttpListener]::new()
-$listener.Prefixes.Add("http://+:${pub}/")
+$listener.Prefixes.Add("http://localhost:${pub}/")
 $listener.Start()
 PL "Proxy :${pub}->:${int} ready"
 

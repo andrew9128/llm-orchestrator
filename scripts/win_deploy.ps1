@@ -373,8 +373,7 @@ function Write-EmbedService {
         "        use_gpu = 'CUDAExecutionProvider' in ort.get_available_providers()",
         "        provider = 'CUDAExecutionProvider' if use_gpu else 'CPUExecutionProvider'",
         "        model_kwargs = {'provider': provider}",
-        "        src = EMBED_DIR if os.path.isdir(EMBED_DIR) else 'BAAI/bge-m3'",
-        "        _model[0] = SentenceTransformer(src, backend='onnx', model_kwargs=model_kwargs)",
+        "        _model[0] = SentenceTransformer('BAAI/bge-m3', backend='onnx', model_kwargs=model_kwargs)",
         "        if use_gpu: print('Embed using CUDA', flush=True)",
         "        else: print('Embed using CPU', flush=True)",
         "        ready[0] = True",
@@ -668,48 +667,39 @@ function Invoke-Deploy {
                 Write-Host "  OCR ONNX models: cached" -ForegroundColor Green
             } else {
                 Write-Host "  Downloading PaddleOCR v5 ONNX (cyrillic)..." -ForegroundColor Yellow
-                # Detection model (PP-OCRv5)
-                $d1 = Download-HF "monkt/paddleocr-onnx" "PP-OCRv5_det_server_infer.onnx" "$ocrDir\det.onnx" "OCR det v5"
-                if (-not $d1) { $d1 = Download-HF "monkt/paddleocr-onnx" "PP-OCRv5_det_infer.onnx" "$ocrDir\det.onnx" "OCR det v5 mobile" }
-                # Cyrillic recognition model
-                $d2 = Download-HF "monkt/paddleocr-onnx" "cyrillic/PP-OCRv3_rec_infer.onnx" "$ocrDir\rec.onnx" "OCR rec cyrillic"
+                # Detection: PP-OCRv4/v5 server (try multiple known paths)
+                $d1 = $false
+                foreach ($detPath in @("det/ch/ch_PP-OCRv4_det_server_infer.onnx", "det/ch_PP-OCRv4_det_server_infer.onnx", "PP-OCRv4_det_server_infer.onnx")) {
+                    $d1 = Download-HF "RapidAI/RapidOCR" $detPath "$ocrDir\det.onnx" "OCR det"
+                    if ($d1) { break }
+                }
+                # Cyrillic recognition (try multiple paths)
+                $d2 = $false
+                foreach ($recPath in @("rec/cyrillic/cyrillic_PP-OCRv3_rec_infer.onnx", "cyrillic/PP-OCRv3_rec_infer.onnx", "rec/cyrillic_PP-OCRv3_rec_infer.onnx")) {
+                    $d2 = Download-HF "RapidAI/RapidOCR" $recPath "$ocrDir
+ec.onnx" "OCR rec cyrillic"
+                    if ($d2) { break }
+                }
                 # Cyrillic dictionary
-                $d3 = Download-HF "monkt/paddleocr-onnx" "cyrillic/cyrillic_dict.txt" "$ocrDir\dict.txt" "OCR dict cyrillic"
+                $d3 = $false
+                foreach ($dictPath in @("rec/cyrillic/cyrillic_dict.txt", "cyrillic/cyrillic_dict.txt")) {
+                    $d3 = Download-HF "RapidAI/RapidOCR" $dictPath "$ocrDir\dict.txt" "OCR dict cyrillic"
+                    if ($d3) { break }
+                }
                 if ($d1 -and $d2 -and $d3) {
                     Set-Stamp "ocr_onnx_v5" "ok"
-                    Write-Host "  OCR ONNX models: ready" -ForegroundColor Green
+                    Write-Host "  OCR ONNX models: ready (cyrillic)" -ForegroundColor Green
                 } else {
-                    Write-Host "  WARNING: some OCR models failed to download - using defaults" -ForegroundColor Yellow
-                    # Will fall back to rapidocr default models
+                    Write-Host "  OCR models not found - rapidocr will use built-in defaults" -ForegroundColor Yellow
+                    # rapidocr-onnxruntime bundles default models, will work without custom paths
+                    Set-Stamp "ocr_onnx_v5" "default"
                 }
             }
         }
 
-        # BGE-M3 ONNX
+        # BGE-M3 ONNX - sentence-transformers handles download/export automatically on first load
         if ($launchEmbed) {
-            $bgeDir = "$W\models\bge_m3_onnx"
-            $bgeStamp = Get-Stamp "bge_m3_onnx"
-            $bgeOk = (Test-Path "$bgeDir\onnx\model.onnx") -and (Get-Item "$bgeDir\onnx\model.onnx" -EA SilentlyContinue).Length -gt 50MB
-            if ($bgeStamp -eq "ok" -and $bgeOk) {
-                Write-Host "  BGE-M3 ONNX: cached" -ForegroundColor Green
-            } else {
-                Write-Host "  Exporting BGE-M3 to ONNX (~1.1GB, one-time)..." -ForegroundColor Yellow
-                New-Item -ItemType Directory -Path $bgeDir -Force | Out-Null
-                $exportScript = @"
-from sentence_transformers import SentenceTransformer
-import os
-m = SentenceTransformer('BAAI/bge-m3', backend='onnx')
-m.save_pretrained('$($bgeDir -replace "\\","/")')
-print('ok')
-"@
-                $result = & python -c $exportScript 2>&1
-                if ($result -match "ok" -or (Test-Path "$bgeDir\onnx\model.onnx")) {
-                    Set-Stamp "bge_m3_onnx" "ok"
-                    Write-Host "  BGE-M3 ONNX: exported and ready" -ForegroundColor Green
-                } else {
-                    Write-Host "  BGE-M3 will download/export on first request" -ForegroundColor Yellow
-                }
-            }
+            Write-Host "  BGE-M3 ONNX: will load on first request (auto-download)" -ForegroundColor Green
         }
     } else {
         Write-Host "[7/8] No ONNX models needed for chat mode." -ForegroundColor Gray
