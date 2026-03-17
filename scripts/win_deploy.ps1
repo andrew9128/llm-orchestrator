@@ -72,7 +72,7 @@ function Invoke-Stop {
     }
 
     # Kill anything holding our service ports (8010-8014) - catches wake proxies and leftovers
-    foreach ($port in 8010, 8011, 8013, 8014) {
+    foreach ($port in 8010, 8011, 8013, 8014, 18011, 18013, 18014) {
         try {
             $conn = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
                     Where-Object { $_.State -eq "Listen" } | Select-Object -First 1
@@ -276,7 +276,7 @@ function Write-AsrService {
         "        if time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)",
         "threading.Thread(target=watcher, daemon=True).start()",
         "load_model()",
-        "HTTPServer(('0.0.0.0', 8011), H).serve_forever()"
+        "HTTPServer(('0.0.0.0', 18011), H).serve_forever()"
     )
     $lines -join "`n" | Out-File "$W\asr_service.py" -Encoding UTF8 -NoNewline
 }
@@ -341,7 +341,7 @@ function Write-OcrService {
         "        if ready[0] and time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)",
         "threading.Thread(target=watcher, daemon=True).start()",
         "threading.Thread(target=load_model, daemon=True).start()",
-        "HTTPServer(('0.0.0.0', 8013), H).serve_forever()"
+        "HTTPServer(('0.0.0.0', 18013), H).serve_forever()"
     )
     $lines -join "`n" | Out-File "$W\ocr_service.py" -Encoding UTF8 -NoNewline
 }
@@ -409,7 +409,7 @@ function Write-EmbedService {
         "        if ready[0] and time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)",
         "threading.Thread(target=watcher, daemon=True).start()",
         "threading.Thread(target=load_model, daemon=True).start()",
-        "HTTPServer(('0.0.0.0', 8014), H).serve_forever()"
+        "HTTPServer(('0.0.0.0', 18014), H).serve_forever()"
     )
     $lines -join "`n" | Out-File "$W\embed_service.py" -Encoding UTF8 -NoNewline
 }
@@ -889,19 +889,19 @@ function Invoke-Deploy {
     if ($launchAsr) {
         Write-Host "  [ASR]   Starting GigaAM   port 8011..." -ForegroundColor Yellow
         Start-Process "python" -ArgumentList "$W\asr_service.py" -WindowStyle Hidden -RedirectStandardOutput "$W\asr.log" -RedirectStandardError $errLog11
-        $svcPorts[8011] = "ASR"
+        $svcPorts[18011] = "ASR"
         "READY" | Out-File "$W\state_8011.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchOcr) {
         Write-Host "  [OCR]   Starting surya-ocr port 8013..." -ForegroundColor Yellow
         Start-Process "python" -ArgumentList "$W\ocr_service.py" -WindowStyle Hidden -RedirectStandardOutput "$W\ocr.log" -RedirectStandardError $errLog13
-        $svcPorts[8013] = "OCR"
+        $svcPorts[18013] = "OCR"
         "READY" | Out-File "$W\state_8013.txt" -Encoding UTF8 -NoNewline
     }
     if ($launchEmbed) {
         Write-Host "  [Embed] Starting RoSBERTa  port 8014..." -ForegroundColor Yellow
         Start-Process "python" -ArgumentList "$W\embed_service.py" -WindowStyle Hidden -RedirectStandardOutput "$W\embed.log" -RedirectStandardError $errLog14
-        $svcPorts[8014] = "Embed"
+        $svcPorts[18014] = "Embed"
         "READY" | Out-File "$W\state_8014.txt" -Encoding UTF8 -NoNewline
     }
 
