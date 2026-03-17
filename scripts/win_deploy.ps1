@@ -518,7 +518,7 @@ function Write-ProxyScript {
 # =============================================================================
 function Write-LlmWatchdog($path) {
     $lines = @(
-        '# LLM Watchdog v15.2 - monitors LLM only, proxy processes run separately'
+        '# LLM Watchdog v15.3 - monitors LLM only, proxy processes run separately'
         '$ProgressPreference = "SilentlyContinue"'
         '$W = "$env:USERPROFILE\llm_native"'
         '$log = "$W\watchdog.log"'
