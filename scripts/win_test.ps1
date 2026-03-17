@@ -51,17 +51,17 @@ function Get-ServiceStatus($port) {
 
 function Post-Json($url, $bodyObj, $timeoutSec = 60) {
     try {
-        $body = ($bodyObj | ConvertTo-Json -Depth 10 -Compress)
+        $body  = ($bodyObj | ConvertTo-Json -Depth 10 -Compress)
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
-        $req = [System.Net.HttpWebRequest]::Create($url)
+        $req   = [System.Net.HttpWebRequest]::Create($url)
         $req.Method = "POST"; $req.Timeout = $timeoutSec * 1000
-        $req.ContentType = "application/json; charset=utf-8"
+        $req.ContentType   = "application/json; charset=utf-8"
         $req.ContentLength = $bytes.Length
-        $stream = $req.GetRequestStream(); $stream.Write($bytes, 0, $bytes.Length); $stream.Close()
+        $s = $req.GetRequestStream(); $s.Write($bytes, 0, $bytes.Length); $s.Close()
         $rsp = $req.GetResponse()
-        $sr = [System.IO.StreamReader]::new($rsp.GetResponseStream(), [System.Text.Encoding]::UTF8)
-        $json = $sr.ReadToEnd() | ConvertFrom-Json
-        $sr.Close(); $rsp.Close(); return $json
+        $ms  = [System.IO.MemoryStream]::new()
+        $rsp.GetResponseStream().CopyTo($ms); $rsp.Close()
+        return [System.Text.Encoding]::UTF8.GetString($ms.ToArray()) | ConvertFrom-Json
     } catch {
         return [PSCustomObject]@{ error = $_.Exception.Message }
     }

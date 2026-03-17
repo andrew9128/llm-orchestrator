@@ -240,6 +240,12 @@ function Write-AsrService {
         "        audio = base64.b64decode(body['audio'])",
         "        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f: f.write(audio); tmp = f.name",
         "        try:",
+        "            res = model(tmp)
+        "            if hasattr(res, '__iter__') and not hasattr(res, 'text'):
+        "                texts = [r.text for r in res if hasattr(r, 'text')]
+        "                text = ' '.join(texts)
+        "            else:
+        "                text = res.text if hasattr(res, 'text') else str(res)
         "            res = model.transcribe(tmp)",
         "            text = res.text if hasattr(res, 'text') else str(res)",
         "        except Exception as e: text = f'ERROR: {e}'",
@@ -327,25 +333,60 @@ function Write-OcrService {
 
 function Write-EmbedService {
     $lines = @(
-        "import sys, json, os",
+        "import sys, json, os, traceback",
         "from http.server import HTTPServer, BaseHTTPRequestHandler",
-        "from sentence_transformers import SentenceTransformer",
-        "model = SentenceTransformer('BAAI/bge-m3', backend='onnx')",
+        "",
+        "_model = [None]",
+        "_err   = [None]",
+        "",
+        "def _load():",
+        "    try:",
+        "        from sentence_transformers import SentenceTransformer",
+        "        try:",
+        "            _model[0] = SentenceTransformer('BAAI/bge-m3', backend='onnx')",
+        "            print('Embed: ONNX backend', flush=True)",
+        "        except Exception:",
+        "            _model[0] = SentenceTransformer('BAAI/bge-m3')",
+        "            print('Embed: default backend (ONNX unavailable)', flush=True)",
+        "    except Exception as e:",
+        "        _err[0] = str(e)",
+        "        print(f'Embed load error: {e}', file=sys.stderr, flush=True)",
+        "",
+        "import threading",
+        "threading.Thread(target=_load, daemon=True).start()",
+        "",
         "class H(BaseHTTPRequestHandler):",
+        "    def log_message(self, f, *a): pass",
         "    def do_GET(self):",
-        "        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
-        "        self.wfile.write(json.dumps({'status': 'ok'}).encode())",
+        "        st = 'ok' if _model[0] else ('error: ' + _err[0] if _err[0] else 'loading')",
+        "        code = 200 if _model[0] else 503",
+        "        self.send_response(code)",
+        "        self.send_header('Content-Type','application/json'); self.end_headers()",
+        "        self.wfile.write(json.dumps({'status': st}).encode())",
         "    def do_POST(self):",
-        "        n = int(self.headers.get('Content-Length', 0))",
-        "        texts = json.loads(self.rfile.read(n))['input']",
-        "        if isinstance(texts, str): texts = [texts]",
-        "        vecs = model.encode(texts, normalize_embeddings=True).tolist()",
-        "        data = [{'index': i, 'embedding': v} for i, v in enumerate(vecs)]",
-        "        self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8'); self.end_headers()",
-        "        self.wfile.write(json.dumps({'object':'list','data':data}, ensure_ascii=False).encode('utf-8'))",
+        "        if not _model[0]:",
+        "            self.send_response(503); self.send_header('Content-Type','application/json'); self.end_headers()",
+        "            self.wfile.write(json.dumps({'error': _err[0] or 'loading'}).encode()); return",
+        "        try:",
+        "            n = int(self.headers.get('Content-Length', 0))",
+        "            texts = json.loads(self.rfile.read(n))['input']",
+        "            if isinstance(texts, str): texts = [texts]",
+        "            vecs = _model[0].encode(texts, normalize_embeddings=True)",
+        "            if hasattr(vecs, 'tolist'): vecs = vecs.tolist()",
+        "            data = [{'index': i, 'embedding': v} for i, v in enumerate(vecs)]",
+        "            out = json.dumps({'object':'list','data':data}, ensure_ascii=False).encode('utf-8')",
+        "            self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8')",
+        "            self.send_header('Content-Length', str(len(out))); self.end_headers()",
+        "            self.wfile.write(out)",
+        "        except Exception as e:",
+        "            msg = json.dumps({'error': traceback.format_exc()}).encode()",
+        "            self.send_response(500); self.send_header('Content-Type','application/json')",
+        "            self.send_header('Content-Length', str(len(msg))); self.end_headers()",
+        "            self.wfile.write(msg)",
+        "",
         "HTTPServer(('0.0.0.0', 18014), H).serve_forever()"
     )
-    $lines -join "`n" | Out-File "$W\embed_service.py" -Encoding UTF8
+    $lines -join "`n" | Out-File "$W\embed_service.py" -Encoding UTF8 -NoNewline
 }
 
 # =============================================================================
@@ -518,7 +559,7 @@ function Write-ProxyScript {
 # =============================================================================
 function Write-LlmWatchdog($path) {
     $lines = @(
-        '# LLM Watchdog v15.3 - monitors LLM only, proxy processes run separately'
+        '# LLM Watchdog v15.4 - monitors LLM only, proxy processes run separately'
         '$ProgressPreference = "SilentlyContinue"'
         '$W = "$env:USERPROFILE\llm_native"'
         '$log = "$W\watchdog.log"'
@@ -578,7 +619,7 @@ function Write-LlmWatchdog($path) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM DEPLOY v15.3 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM DEPLOY v15.4 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
     Write-Host "    ONNX-native stack: no PyTorch for special services" -ForegroundColor Gray
 
     Invoke-Stop
