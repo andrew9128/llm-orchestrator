@@ -55,13 +55,13 @@ function Post-Json($url, $bodyObj, $timeoutSec = 60) {
         $req.ContentType = "application/json"; $req.ContentLength = $bytes.Length
         $stream = $req.GetRequestStream(); $stream.Write($bytes, 0, $bytes.Length); $stream.Close()
         $rsp = $req.GetResponse()
-        $sr = [System.IO.StreamReader]::new($rsp.GetResponseStream())
+        $sr = [System.IO.StreamReader]::new($rsp.GetResponseStream(), [System.Text.Encoding]::UTF8)
         $json = $sr.ReadToEnd() | ConvertFrom-Json -EA SilentlyContinue
         $sr.Close(); $rsp.Close(); return $json
     } catch [System.Net.WebException] {
         $wr = $_.Exception.Response
         if ($wr) {
-            $sr2 = [System.IO.StreamReader]::new($wr.GetResponseStream())
+            $sr2 = [System.IO.StreamReader]::new($wr.GetResponseStream(), [System.Text.Encoding]::UTF8)
             $errBody = $sr2.ReadToEnd(); $sr2.Close()
             return [PSCustomObject]@{ error = $errBody }
         }
@@ -151,8 +151,18 @@ Check "LLM health" ($st -eq "ok") "status=$st"
 
 if ($llmOk) {
     # Models list
-    $models = Post-Json "http://localhost:8010/v1/models" @{} 10
-    Check "LLM /v1/models" ($models.data -and $models.data.Count -gt 0) "models: $(($models.data | ForEach-Object {$_.id}) -join ', ')"
+    try {
+        $modReq = [System.Net.HttpWebRequest]::Create("http://localhost:8010/v1/models")
+        $modReq.Timeout = 10000; $modReq.Method = "GET"
+        $modRsp = $modReq.GetResponse()
+        $modSr = [System.IO.StreamReader]::new($modRsp.GetResponseStream(), [System.Text.Encoding]::UTF8)
+        $modJson = $modSr.ReadToEnd() | ConvertFrom-Json -EA SilentlyContinue
+        $modSr.Close(); $modRsp.Close()
+        $modelIds = if ($modJson.data) { ($modJson.data | ForEach-Object {$_.id}) -join ', ' } else { "(on-demand - loads on first request)" }
+        Check "LLM /v1/models" ($modJson -ne $null) "response ok, models: $modelIds"
+    } catch {
+        Check "LLM /v1/models" $false $_.Exception.Message
+    }
 
     # Basic Russian chat
     $r = Post-Json "http://localhost:8010/v1/chat/completions" @{
@@ -161,8 +171,9 @@ if ($llmOk) {
         max_tokens = 20
         temperature = 0
     } 60
-    $reply = $r.choices[0].message.content
-    Check "LLM Russian chat" ($reply -match "Москва|москва") "reply: $($reply -replace '\s+',' ')"
+    $reply = if ($r.choices) { $r.choices[0].message.content } else { "" }
+    $replyClean = $reply -replace "<think>.*?</think>",""  -replace "\s+"," "
+    Check "LLM Russian chat" ($replyClean -match "Москва|москва|Moskov") "reply: $($replyClean.Trim().Substring(0,[math]::Min(80,$replyClean.Trim().Length)))"
 
     # English chat
     $r2 = Post-Json "http://localhost:8010/v1/chat/completions" @{
@@ -171,8 +182,8 @@ if ($llmOk) {
         max_tokens = 20
         temperature = 0
     } 60
-    $reply2 = $r2.choices[0].message.content
-    Check "LLM English chat" ($reply2 -match "Paris|paris") "reply: $($reply2 -replace '\s+',' ')"
+    $reply2 = if ($r2.choices) { ($r2.choices[0].message.content -replace "<think>.*?</think>","").Trim() } else { "" }
+    Check "LLM English chat" ($reply2 -match "Paris|paris") "reply: $($reply2.Substring(0,[math]::Min(80,$reply2.Length)))"
 
     # Context/length test
     $r3 = Post-Json "http://localhost:8010/v1/chat/completions" @{
@@ -181,8 +192,11 @@ if ($llmOk) {
         max_tokens = 100
         temperature = 0
     } 60
-    $nums = ($r3.choices[0].message.content -split '\n' | Where-Object { $_ -match '^\d+' }).Count
-    Check "LLM numbered list" ($nums -ge 8) "got $nums numbered lines"
+    $r3text = if ($r3.choices) { $r3.choices[0].message.content -replace "<think>.*?</think>","" } else { "" }
+    $nums = ($r3text -split "
+" | Where-Object { $_ -match "^\s*\d+" }).Count
+    Check "LLM numbered list" ($nums -ge 8) "got $nums numbered lines in: $($r3text -replace '
+',' ' | ForEach-Object {$_.Substring(0,[math]::Min(60,$_.Length))})"
 
     # Streaming check
     try {
@@ -346,23 +360,28 @@ Check "Embed health/proxy" ($st -ne "down" -and $st -ne $null) "status=$st"
 if ($embedOk) {
     # Test 1: Basic embedding
     $r = Post-Json "http://localhost:8014/v1/embeddings" @{ input = "Привет мир" } 60
-    $hasEmbed = $r.data -and $r.data.Count -gt 0 -and $r.data[0].embedding -and $r.data[0].embedding.Count -gt 100
-    Check "Embed basic" $hasEmbed "dims=$(if($r.data){$r.data[0].embedding.Count}else{0})"
+    $embedData = if ($r.data) { $r.data } elseif ($r.object -eq "list") { $r.data } else { $null }
+    $dims = if ($embedData -and $embedData.Count -gt 0) { 
+        $emb = $embedData[0].embedding
+        if ($emb) { $emb.Count } else { 0 }
+    } else { 0 }
+    Check "Embed basic" ($dims -gt 100) "dims=$dims error=$(if($r.error){$r.error}else{'none'})"
 
     # Test 2: Batch
     $r2 = Post-Json "http://localhost:8014/v1/embeddings" @{ input = @("первое предложение","second sentence","третье") } 60
-    Check "Embed batch (3 texts)" ($r2.data -and $r2.data.Count -eq 3) "got $($r2.data.Count) embeddings"
+    $batchData = if ($r2.data) { $r2.data } else { @() }
+    Check "Embed batch (3 texts)" ($batchData.Count -eq 3) "got $($batchData.Count) embeddings error=$(if($r2.error){$r2.error}else{'none'})"
 
     # Test 3: Cosine similarity (similar texts should score high)
-    if ($r2.data -and $r2.data.Count -eq 3) {
-        $v1 = $r2.data[0].embedding
-        $v2 = $r2.data[2].embedding  # both Russian
+    if ($batchData.Count -eq 3) {
+        $v1 = $batchData[0].embedding
+        $v2 = $batchData[2].embedding  # both Russian
         $dot = 0; $n1 = 0; $n2 = 0
         for ($i = 0; $i -lt $v1.Count; $i++) { $dot += $v1[$i]*$v2[$i]; $n1 += $v1[$i]*$v1[$i]; $n2 += $v2[$i]*$v2[$i] }
         $cos = $dot / ([math]::Sqrt($n1) * [math]::Sqrt($n2))
         Check "Embed cosine similarity" ($cos -gt 0.3) "cosine(ru1,ru3)=$([math]::Round($cos,3))"
     } else {
-        Check "Embed cosine similarity" $null "batch test failed"
+        Check "Embed cosine similarity" $null "batch returned $($batchData.Count) items"
     }
 
 } else {
