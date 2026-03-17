@@ -578,7 +578,7 @@ function Write-LlmWatchdog($path) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM DEPLOY v15.0 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM DEPLOY v15.1 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
     Write-Host "    ONNX-native stack: no PyTorch for special services" -ForegroundColor Gray
 
     Invoke-Stop
