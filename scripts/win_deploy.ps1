@@ -622,7 +622,7 @@ function Invoke-Deploy {
         }
         if ($launchEmbed) {
             Pip-Install "sentence-transformers" "sentence_transformers" | Out-Null
-            Pip-Install "optimum" "optimum" | Out-Null
+            Pip-Install "optimum[onnxruntime]" "optimum" | Out-Null
         }
     } else {
         Write-Host "[6/8] No ONNX packages needed for chat mode." -ForegroundColor Gray
@@ -663,29 +663,17 @@ function Invoke-Deploy {
             $detOk    = (Test-Path "$ocrDir\det.onnx") -and (Get-Item "$ocrDir\det.onnx" -EA SilentlyContinue).Length -gt 100KB
             $recOk    = (Test-Path "$ocrDir\rec.onnx") -and (Get-Item "$ocrDir\rec.onnx" -EA SilentlyContinue).Length -gt 100KB
             $dictOk   = (Test-Path "$ocrDir\dict.txt") -and (Get-Item "$ocrDir\dict.txt" -EA SilentlyContinue).Length -gt 1KB
-            if ($ocrStamp -eq "ok" -and $detOk -and $recOk -and $dictOk) {
+            if (($ocrStamp -eq "ok" -or $ocrStamp -eq "default") -and ($ocrStamp -eq "default" -or ($detOk -and $recOk -and $dictOk))) {
                 Write-Host "  OCR ONNX models: cached" -ForegroundColor Green
             } else {
                 Write-Host "  Downloading PaddleOCR v5 ONNX (cyrillic)..." -ForegroundColor Yellow
                 # Detection: PP-OCRv4/v5 server (try multiple known paths)
-                $d1 = $false
-                foreach ($detPath in @("det/ch/ch_PP-OCRv4_det_server_infer.onnx", "det/ch_PP-OCRv4_det_server_infer.onnx", "PP-OCRv4_det_server_infer.onnx")) {
-                    $d1 = Download-HF "RapidAI/RapidOCR" $detPath "$ocrDir\det.onnx" "OCR det"
-                    if ($d1) { break }
-                }
-                # Cyrillic recognition (try multiple paths)
-                $d2 = $false
-                foreach ($recPath in @("rec/cyrillic/cyrillic_PP-OCRv3_rec_infer.onnx", "cyrillic/PP-OCRv3_rec_infer.onnx", "rec/cyrillic_PP-OCRv3_rec_infer.onnx")) {
-                    $d2 = Download-HF "RapidAI/RapidOCR" $recPath "$ocrDir
-ec.onnx" "OCR rec cyrillic"
-                    if ($d2) { break }
-                }
-                # Cyrillic dictionary
-                $d3 = $false
-                foreach ($dictPath in @("rec/cyrillic/cyrillic_dict.txt", "cyrillic/cyrillic_dict.txt")) {
-                    $d3 = Download-HF "RapidAI/RapidOCR" $dictPath "$ocrDir\dict.txt" "OCR dict cyrillic"
-                    if ($d3) { break }
-                }
+                $detFile  = "$ocrDir\det.onnx"
+                $recFile  = "$ocrDir\rec.onnx"
+                $dictFile = "$ocrDir\dict.txt"
+                $d1 = Download-HF "RapidAI/RapidOCR" "det/ch/ch_PP-OCRv4_det_server_infer.onnx" $detFile "OCR det"
+                $d2 = Download-HF "RapidAI/RapidOCR" "rec/cyrillic/cyrillic_PP-OCRv3_rec_infer.onnx" $recFile "OCR rec cyrillic"
+                $d3 = Download-HF "RapidAI/RapidOCR" "rec/cyrillic/cyrillic_dict.txt" $dictFile "OCR dict"
                 if ($d1 -and $d2 -and $d3) {
                     Set-Stamp "ocr_onnx_v5" "ok"
                     Write-Host "  OCR ONNX models: ready (cyrillic)" -ForegroundColor Green
