@@ -104,17 +104,29 @@ function Invoke-Status {
     }
     foreach ($port in 8010, 8011, 8013, 8014) {
         $name = $portMap[$port]
+        $st = ""
         try {
-            $r = Invoke-WebRequest -Uri "http://localhost:$port/health" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
-            $h = ($r.Content | ConvertFrom-Json).status
-            Write-Host "  $name [$port]: $h" -ForegroundColor Green
-        } catch {
-            $stateFile = "$W\state_$port.txt"
-            if ((Test-Path $stateFile) -and (Get-Content $stateFile -Raw).Trim() -eq "STOPPED") {
-                Write-Host "  $name [$port]: STOPPED (idle - restarts on next request)" -ForegroundColor Yellow
-            } else {
-                Write-Host "  $name [$port]: NOT RUNNING" -ForegroundColor Red
+            $sr = [System.Net.HttpWebRequest]::Create("http://localhost:$port/health")
+            $sr.Timeout = 3000; $sr.Method = "GET"
+            try {
+                $srsp = $sr.GetResponse()
+                $ssr = [System.IO.StreamReader]::new($srsp.GetResponseStream())
+                $st = ($ssr.ReadToEnd() | ConvertFrom-Json -EA SilentlyContinue).status
+                $ssr.Close(); $srsp.Close()
+            } catch [System.Net.WebException] {
+                $swr = $_.Exception.Response
+                if ($swr) {
+                    $ssr2 = [System.IO.StreamReader]::new($swr.GetResponseStream())
+                    $st = ($ssr2.ReadToEnd() | ConvertFrom-Json -EA SilentlyContinue).status
+                    $ssr2.Close()
+                }
             }
+        } catch {}
+        if ($st) {
+            if ($st -eq "ok") { $color = "Green" } elseif ($st -eq "loading") { $color = "Yellow" } else { $color = "Red" }
+            Write-Host "  $name [$port]: $st" -ForegroundColor $color
+        } else {
+            Write-Host "  $name [$port]: NOT RUNNING" -ForegroundColor Red
         }
     }
     $wd = Get-WmiObject Win32_Process | Where-Object {
@@ -566,7 +578,7 @@ function Invoke-Deploy {
         Remove-Item "$W\stamp_pkg_transformers.txt" -EA SilentlyContinue
         Write-Host "  Resetting transformers stamp (4.44->latest for surya compat)..." -ForegroundColor Yellow
     }
-    if ((Get-Stamp "surya_cache") -ne "") { Remove-Item "$W\stamp_surya_cache.txt" -EA SilentlyContinue }
+    # surya_cache stamp is managed by the install block - do not reset here
     $tag = "b5248"
 
     # [1] System deps
@@ -830,13 +842,13 @@ function Invoke-Deploy {
         } else { Write-Host "  Torch '$currentTorch' OK" -ForegroundColor Green }
         # surya-ocr with stamp
         $suryaStamp = Get-Stamp "surya_ocr"
-        $suryaInstalled = (& python -m pip show surya-ocr 2>$null | Select-String "^Version:") -replace "Version:\s*",""
+        $suryaInstalled = ("" + (& python -m pip show surya-ocr 2>$null | Select-String "^Version:")).Trim() -replace "(?i)version:\s*",""
         if ($suryaInstalled) { $suryaInstalled = $suryaInstalled.Trim() }
         $cacheStamp = Get-Stamp "surya_cache"
         if ($suryaStamp -ne $suryaInstalled -or -not $suryaInstalled) {
             Write-Host "  Installing surya-ocr..." -ForegroundColor Gray
             & python -m pip install --quiet --prefer-binary "surya-ocr" 2>> $errLog13 | Out-Null
-            $suryaInstalled = (& python -m pip show surya-ocr 2>$null | Select-String "^Version:") -replace "Version:\s*",""
+            $suryaInstalled = ("" + (& python -m pip show surya-ocr 2>$null | Select-String "^Version:")).Trim() -replace "(?i)version:\s*",""
             if ($suryaInstalled) { $suryaInstalled = $suryaInstalled.Trim(); Set-Stamp "surya_ocr" $suryaInstalled }
         } else { Write-Host "  surya-ocr $suryaInstalled (cached)" -ForegroundColor Green }
         if ($cacheStamp -ne $suryaInstalled -and $suryaInstalled) {
