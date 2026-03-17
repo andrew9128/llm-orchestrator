@@ -224,38 +224,37 @@ function Select-BestModel($vramMb, $deployMode) {
 # SERVICE SCRIPT WRITERS
 # =============================================================================
 function Write-AsrService {
-    $lines = @(
-        "import sys, json, base64, tempfile, os, time, threading",
-        "from http.server import HTTPServer, BaseHTTPRequestHandler",
-        "import onnx_asr",
-        "model = onnx_asr.load_model('gigaam-v3-e2e-rnnt')",
-        "class H(BaseHTTPRequestHandler):",
-        "    def log_message(self, f, *a): pass",
-        "    def do_GET(self):",
-        "        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
-        "        self.wfile.write(json.dumps({'status':'ok'}).encode())",
-        "    def do_POST(self):",
-        "        n = int(self.headers.get('Content-Length', 0))",
-        "        body = json.loads(self.rfile.read(n))",
-        "        audio = base64.b64decode(body['audio'])",
-        "        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f: f.write(audio); tmp = f.name",
-        "        try:",
-        "            res = model(tmp)
-        "            if hasattr(res, '__iter__') and not hasattr(res, 'text'):
-        "                texts = [r.text for r in res if hasattr(r, 'text')]
-        "                text = ' '.join(texts)
-        "            else:
-        "                text = res.text if hasattr(res, 'text') else str(res)
-        "            res = model.transcribe(tmp)",
-        "            text = res.text if hasattr(res, 'text') else str(res)",
-        "        except Exception as e: text = f'ERROR: {e}'",
-        "        finally: ",
-        "            if os.path.exists(tmp): os.unlink(tmp)",
-        "        self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8'); self.end_headers()",
-        "        self.wfile.write(json.dumps({'text': text}, ensure_ascii=False).encode('utf-8'))",
-        "HTTPServer(('0.0.0.0', 18011), H).serve_forever()"
-    )
-    $lines -join "`n" | Out-File "$W\asr_service.py" -Encoding UTF8
+    $script = @"
+import sys, json, base64, tempfile, os
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import onnx_asr
+model = onnx_asr.load_model('gigaam-v3-e2e-rnnt')
+class H(BaseHTTPRequestHandler):
+    def log_message(self, f, *a): pass
+    def do_GET(self):
+        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
+        self.wfile.write(json.dumps({'status':'ok'}).encode())
+    def do_POST(self):
+        n = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(n))
+        audio = base64.b64decode(body['audio'])
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+            f.write(audio); tmp = f.name
+        try:
+            res = model(tmp)
+            if hasattr(res, '__iter__') and not hasattr(res, 'text'):
+                texts = [r.text for r in res if hasattr(r, 'text')]
+                text = ' '.join(texts)
+            else:
+                text = res.text if hasattr(res, 'text') else str(res)
+        except Exception as e: text = 'ERROR: ' + str(e)
+        finally:
+            if os.path.exists(tmp): os.unlink(tmp)
+        self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8'); self.end_headers()
+        self.wfile.write(json.dumps({'text': text}, ensure_ascii=False).encode('utf-8'))
+HTTPServer(('0.0.0.0', 18011), H).serve_forever()
+"@
+    $script | Out-File "$W\asr_service.py" -Encoding UTF8
 }
 
 function Write-OcrService {
@@ -619,7 +618,7 @@ function Write-LlmWatchdog($path) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM DEPLOY v15.4 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM DEPLOY v15.5 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
     Write-Host "    ONNX-native stack: no PyTorch for special services" -ForegroundColor Gray
 
     Invoke-Stop
