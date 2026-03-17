@@ -240,16 +240,18 @@ function Write-AsrService {
         "        audio = base64.b64decode(body['audio'])",
         "        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f: f.write(audio); tmp = f.name",
         "        try:",
-        "            result = _model[0](tmp)",
-        "            text = result.text if hasattr(result, 'text') else str(result)",
-        "        except Exception as e: text = 'ERROR: ' + str(e)",
-        "        finally: os.unlink(tmp)",
+        "            res = model.transcribe(tmp)",
+        "            text = res.text if hasattr(res, 'text') else str(res)",
+        "        except Exception as e: text = f'ERROR: {e}'",
+        "        finally: ",
+        "            if os.path.exists(tmp): os.unlink(tmp)",
         "        self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8'); self.end_headers()",
         "        self.wfile.write(json.dumps({'text': text}, ensure_ascii=False).encode('utf-8'))",
         "HTTPServer(('0.0.0.0', 18011), H).serve_forever()"
     )
     $lines -join "`n" | Out-File "$W\asr_service.py" -Encoding UTF8
 }
+
 function Write-OcrService {
     # RapidOCR with PaddleOCR v5 ONNX models (cyrillic)
     $lines = @(
@@ -332,23 +334,15 @@ function Write-EmbedService {
         "class H(BaseHTTPRequestHandler):",
         "    def do_GET(self):",
         "        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
-        "        self.wfile.write(json.dumps({'status':'ok'}).encode())",
+        "        self.wfile.write(json.dumps({'status': 'ok'}).encode())",
         "    def do_POST(self):",
-        "        if not ready[0]:",
-        "            self.send_response(503); self.end_headers(); return",
-        "        last_req[0] = time.time()",
-        "        n    = int(self.headers.get('Content-Length', 0))",
-        "        body = json.loads(self.rfile.read(n))",
-        "        texts = body.get('input', [])",
+        "        n = int(self.headers.get('Content-Length', 0))",
+        "        texts = json.loads(self.rfile.read(n))['input']",
         "        if isinstance(texts, str): texts = [texts]",
-        "        try:",
-        "            vecs = _model[0].encode(texts, normalize_embeddings=True).tolist()",
-        "            data = [{'index': i, 'embedding': v} for i, v in enumerate(vecs)]",
-        "            self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8'); self.end_headers()",
-        "            self.wfile.write(json.dumps({'object':'list','data':data}, ensure_ascii=False).encode('utf-8'))",
-        "        except Exception as e:",
-        "            self.send_response(500); self.end_headers()",
-        "            self.wfile.write(json.dumps({'error': str(e)}).encode('utf-8'))",
+        "        vecs = model.encode(texts, normalize_embeddings=True).tolist()",
+        "        data = [{'index': i, 'embedding': v} for i, v in enumerate(vecs)]",
+        "        self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8'); self.end_headers()",
+        "        self.wfile.write(json.dumps({'object':'list','data':data}, ensure_ascii=False).encode('utf-8'))",
         "HTTPServer(('0.0.0.0', 18014), H).serve_forever()"
     )
     $lines -join "`n" | Out-File "$W\embed_service.py" -Encoding UTF8
@@ -584,7 +578,7 @@ function Write-LlmWatchdog($path) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM DEPLOY v15.2 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM DEPLOY v15.3 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
     Write-Host "    ONNX-native stack: no PyTorch for special services" -ForegroundColor Gray
 
     Invoke-Stop
