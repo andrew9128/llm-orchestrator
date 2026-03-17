@@ -295,31 +295,33 @@ function Write-OcrService {
         "IDLE_TIMEOUT = $IDLE_OCR",
         "last_req = [time.time()]",
         "_ocr = [None]; ready = [False]; err_msg = [None]",
-        "OCR_DIR = os.path.join(os.path.expanduser('~'), 'llm_native', 'models', 'ocr_onnx')",
         "def load_model():",
         "    try:",
-        "        from rapidocr_onnxruntime import RapidOCR",
-        "        det = os.path.join(OCR_DIR, 'det.onnx')",
-        "        rec = os.path.join(OCR_DIR, 'rec.onnx')",
-        "        keys = os.path.join(OCR_DIR, 'dict.txt')",
+        "        from rapidocr import RapidOCR, LangRec, EngineType, OCRVersion",
         "        import onnxruntime as ort",
         "        use_gpu = 'CUDAExecutionProvider' in ort.get_available_providers()",
-        "        gpu_kwargs = dict(use_cuda=True, cuda_device_id=0) if use_gpu else {}",
-        "        if os.path.exists(det) and os.path.exists(rec) and os.path.exists(keys):",
-        "            _ocr[0] = RapidOCR(det_model_path=det, rec_model_path=rec, rec_keys_path=keys, **gpu_kwargs)",
-        "        else:",
-        "            _ocr[0] = RapidOCR(**gpu_kwargs)",
-        "        if use_gpu: print('OCR using CUDA', flush=True)",
-        "        else: print('OCR using CPU (onnxruntime-gpu not available)', flush=True)",
+        "        _ocr[0] = RapidOCR(params={",
+        "            'Rec.lang_type': LangRec.ESLAV,",
+        "            'Rec.engine_type': EngineType.CUDA if use_gpu else EngineType.ONNXRUNTIME,",
+        "            'Rec.ocr_version': OCRVersion.PPOCRV5,",
+        "            'Det.engine_type': EngineType.CUDA if use_gpu else EngineType.ONNXRUNTIME,",
+        "        })",
+        "        if use_gpu: print('OCR: CUDA ESLAV Russian PP-OCRv5', flush=True)",
+        "        else: print('OCR: CPU ESLAV Russian PP-OCRv5', flush=True)",
         "        ready[0] = True",
         "    except Exception as e:",
         "        err_msg[0] = str(e)",
         "        print(f'LOAD_ERROR: {e}', file=sys.stderr, flush=True)",
         "def do_ocr(image_path):",
-        "    result, _ = _ocr[0](image_path)",
+        "    result = _ocr[0](image_path)",
         "    if not result: return ''",
-        "    lines = [item[1] for item in result if item and len(item) > 1]",
-        "    return chr(10).join(lines)",
+        "    txts = getattr(result, 'txts', None)",
+        "    if txts: return chr(10).join(t for t in txts if t and t.strip())",
+        "    if hasattr(result, '__iter__'):",
+        "        rows = list(result)",
+        "        if rows and isinstance(rows[0], (list,tuple)) and len(rows[0]) > 1:",
+        "            return chr(10).join(r[1] for r in rows if r and len(r) > 1 and r[1])",
+        "    return ''",
         "class H(BaseHTTPRequestHandler):",
         "    def log_message(self, f, *a): pass",
         "    def do_GET(self):",
@@ -808,7 +810,7 @@ function Invoke-Deploy {
             Pip-Install "onnx-asr" "onnx_asr" | Out-Null
         }
         if ($launchOcr) {
-            Pip-Install "rapidocr-onnxruntime" "rapidocr_onnxruntime" | Out-Null
+            Pip-Install "rapidocr[onnxruntime]" "rapidocr" | Out-Null
         }
         if ($launchEmbed) {
             Pip-Install "sentence-transformers" "sentence_transformers" | Out-Null
@@ -845,34 +847,9 @@ function Invoke-Deploy {
             }
         }
 
-        # RapidOCR cyrillic models
+        # rapidocr auto-downloads ESLAV/Russian models on first use
         if ($launchOcr) {
-            $ocrDir = "$W\models\ocr_onnx"
-            New-Item -ItemType Directory -Path $ocrDir -Force | Out-Null
-            $ocrStamp = Get-Stamp "ocr_onnx_v5"
-            $detOk    = (Test-Path "$ocrDir\det.onnx") -and (Get-Item "$ocrDir\det.onnx" -EA SilentlyContinue).Length -gt 100KB
-            $recOk    = (Test-Path "$ocrDir\rec.onnx") -and (Get-Item "$ocrDir\rec.onnx" -EA SilentlyContinue).Length -gt 100KB
-            $dictOk   = (Test-Path "$ocrDir\dict.txt") -and (Get-Item "$ocrDir\dict.txt" -EA SilentlyContinue).Length -gt 1KB
-            if (($ocrStamp -eq "ok" -or $ocrStamp -eq "default") -and ($ocrStamp -eq "default" -or ($detOk -and $recOk -and $dictOk))) {
-                Write-Host "  OCR ONNX models: cached" -ForegroundColor Green
-            } else {
-                Write-Host "  Downloading PaddleOCR v5 ONNX (cyrillic)..." -ForegroundColor Yellow
-                # Detection: PP-OCRv4/v5 server (try multiple known paths)
-                $detFile  = "$ocrDir\det.onnx"
-                $recFile  = "$ocrDir\rec.onnx"
-                $dictFile = "$ocrDir\dict.txt"
-                $d1 = Download-HF "RapidAI/RapidOCR" "det/ch/ch_PP-OCRv4_det_server_infer.onnx" $detFile "OCR det"
-                $d2 = Download-HF "RapidAI/RapidOCR" "rec/cyrillic/cyrillic_PP-OCRv3_rec_infer.onnx" $recFile "OCR rec cyrillic"
-                $d3 = Download-HF "RapidAI/RapidOCR" "rec/cyrillic/cyrillic_dict.txt" $dictFile "OCR dict"
-                if ($d1 -and $d2 -and $d3) {
-                    Set-Stamp "ocr_onnx_v5" "ok"
-                    Write-Host "  OCR ONNX models: ready (cyrillic)" -ForegroundColor Green
-                } else {
-                    Write-Host "  OCR models not found - rapidocr will use built-in defaults" -ForegroundColor Yellow
-                    # rapidocr-onnxruntime bundles default models, will work without custom paths
-                    Set-Stamp "ocr_onnx_v5" "default"
-                }
-            }
+            Write-Host "  OCR: rapidocr will auto-download Russian models on first request" -ForegroundColor Green
         }
 
         # BGE-M3 ONNX - sentence-transformers handles download/export automatically on first load
