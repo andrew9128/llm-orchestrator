@@ -56,15 +56,20 @@ function Post-Json($url, $bodyObj, $timeoutSec = 60) {
         $req = [System.Net.HttpWebRequest]::Create($url)
         $req.Method = "POST"; $req.Timeout = $timeoutSec * 1000
         $req.ContentType = "application/json; charset=utf-8"
-        $req.GetRequestStream().Write($bytes, 0, $bytes.Length)
+        
+        $stream = $req.GetRequestStream()
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Close()
+
         $rsp = $req.GetResponse()
         $sr = [System.IO.StreamReader]::new($rsp.GetResponseStream(), [System.Text.Encoding]::UTF8)
         $json = $sr.ReadToEnd() | ConvertFrom-Json
-        $sr.Close(); $rsp.Close(); return $json
-    } catch { 
+        $sr.Close(); $rsp.Close()
+        return $json
+    } catch {
+        return [PSCustomObject]@{ error = $_.Exception.Message }
     }
 }
-
 function Get-TestImage($url, $label) {
     $tmp = "$env:TEMP\test_ocr_$([Guid]::NewGuid().ToString('N').Substring(0,8)).jpg"
     try {
