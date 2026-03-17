@@ -51,26 +51,17 @@ function Get-ServiceStatus($port) {
 
 function Post-Json($url, $bodyObj, $timeoutSec = 60) {
     try {
-        $body = ($bodyObj | ConvertTo-Json -Depth 10)
+        $body = ($bodyObj | ConvertTo-Json -Depth 10 -Compress)
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
         $req = [System.Net.HttpWebRequest]::Create($url)
         $req.Method = "POST"; $req.Timeout = $timeoutSec * 1000
-        $req.ContentType = "application/json"; $req.ContentLength = $bytes.Length
-        $stream = $req.GetRequestStream(); $stream.Write($bytes, 0, $bytes.Length); $stream.Close()
+        $req.ContentType = "application/json; charset=utf-8"
+        $req.GetRequestStream().Write($bytes, 0, $bytes.Length)
         $rsp = $req.GetResponse()
         $sr = [System.IO.StreamReader]::new($rsp.GetResponseStream(), [System.Text.Encoding]::UTF8)
-        $json = $sr.ReadToEnd() | ConvertFrom-Json -EA SilentlyContinue
+        $json = $sr.ReadToEnd() | ConvertFrom-Json
         $sr.Close(); $rsp.Close(); return $json
-    } catch [System.Net.WebException] {
-        $wr = $_.Exception.Response
-        if ($wr) {
-            $sr2 = [System.IO.StreamReader]::new($wr.GetResponseStream(), [System.Text.Encoding]::UTF8)
-            $errBody = $sr2.ReadToEnd(); $sr2.Close()
-            return [PSCustomObject]@{ error = $errBody }
-        }
-        return [PSCustomObject]@{ error = $_.Exception.Message }
-    } catch {
-        return [PSCustomObject]@{ error = $_.Exception.Message }
+    } catch { 
     }
 }
 
