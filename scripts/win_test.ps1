@@ -149,7 +149,7 @@ if ($llmOk) {
     # Models list
     try {
         $modReq = [System.Net.HttpWebRequest]::Create("http://localhost:8010/v1/models")
-        $modReq.Timeout = 10000; $modReq.Method = "GET"
+        $modReq.Timeout = 12000; $modReq.Method = "GET"
         $modRsp = $modReq.GetResponse()
         $modSr = [System.IO.StreamReader]::new($modRsp.GetResponseStream(), [System.Text.Encoding]::UTF8)
         $modJson = $modSr.ReadToEnd() | ConvertFrom-Json -EA SilentlyContinue
