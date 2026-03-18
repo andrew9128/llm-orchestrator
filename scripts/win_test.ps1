@@ -316,7 +316,7 @@ if ($asrOk) {
         $wc = [System.Net.WebClient]::new()
         $wc.Headers["User-Agent"] = "Mozilla/5.0"
         # Common Voice Russian sample
-        $wc.DownloadFile("https://upload.wikimedia.org/wikipedia/commons/4/45/Ru-%D0%9C%D0%BE%D1%81%D0%BA%D0%B2%D0%B0.ogg", "$env:TEMP\test_asr_ru.ogg")
+        $wc.DownloadFile("https://upload.wikimedia.org/wikipedia/commons/4/45/Ru-%D0%9C%D0%BE%D1%81%D0%BA%D0%B2%D0%B0.ogg", ...
         $wc.Dispose()
         # Try to use the OGG directly - onnx-asr may handle it
         if ((Test-Path "$env:TEMP\test_asr_ru.ogg") -and (Get-Item "$env:TEMP\test_asr_ru.ogg").Length -gt 1KB) {
@@ -357,7 +357,7 @@ Check "Embed health/proxy" ($st -ne "down" -and $st -ne $null) "status=$st"
 if ($embedOk) {
     # Test 1: Basic embedding
     $r = Post-Json "http://localhost:8014/v1/embeddings" @{ input = "Привет мир" } 60
-    $embedData = if ($r.data) { @($r.data) } elseif ($r.object -eq "list") { @($r.data) } else { @() }
+    $embedData = @(if ($r.data) { $r.data } elseif ($r.object -eq "list") { $r.data })
     $dims = if ($embedData -and $embedData.Count -gt 0) { 
         $emb = $embedData[0].embedding
         if ($emb) { $emb.Count } else { 0 }
