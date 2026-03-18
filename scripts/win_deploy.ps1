@@ -780,9 +780,9 @@ function Invoke-Deploy {
         }
         if ($launchOcr) {
             Pip-Install "rapidocr[onnxruntime]" "rapidocr" | Out-Null
+            Write-Host "  Removing CPU onnxruntime..." -ForegroundColor Gray
+            & python -m pip uninstall -y onnxruntime 2>&1 | Out-Null
         }
-        # onnxruntime-gpu и fastembed-gpu - всегда последними,
-        # чтобы зависимости выше не перезаписали CPU-версиями
         $orVer = Pip-Install "onnxruntime-gpu" "onnxruntime_gpu"
         if (-not $orVer) {
             Pip-Install "onnxruntime" "onnxruntime" | Out-Null
