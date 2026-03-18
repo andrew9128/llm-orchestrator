@@ -306,7 +306,8 @@ if ($asrOk) {
     # Test 1: Silence WAV (service should respond without error)
     $silenceB64 = Make-WavBase64 ""
     $r = Post-Json "http://localhost:8011/v1/asr" @{ audio=$silenceB64 } 30
-    Check "ASR accepts silent WAV" ($r -ne $null -and -not $r.error) "response: $(if($r.text){"text='$($r.text)'"} elseif($r.error){"error=$($r.error)"}else{'no text field'})"
+    $hasTextField = $r.PSObject.Properties.Name -contains 'text'
+    Check "ASR accepts silent WAV" ($r -ne $null -and -not $r.error) "response: $(if($hasTextField){"text='$($r.text)'"}elseif($r.error){"error=$($r.error)"}else{'no text field'})"
 
     # Test 2: Download and transcribe real Russian speech sample
     $wavRu = "$env:TEMP\test_asr_ru.wav"

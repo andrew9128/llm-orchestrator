@@ -366,6 +366,16 @@ def _load():
 threading.Thread(target=_load, daemon=True).start()
 class H(BaseHTTPRequestHandler):
     def log_message(self, f, *a): pass
+    def _load():
+        try:
+            from fastembed import TextEmbedding
+            supported = [m['model'] for m in TextEmbedding.list_supported_models()]
+            name = 'BAAI/bge-m3' if 'BAAI/bge-m3' in supported else supported[0]
+            _model[0] = TextEmbedding(name)
+            print(f'Embed: {name} ready', flush=True)
+        except Exception as e:
+            _err[0] = str(e)
+            print(f'Embed error: {e}', flush=True)
     def do_GET(self):
         st = 'ok' if _model[0] else ('error: '+_err[0] if _err[0] else 'loading')
         self.send_response(200 if _model[0] else 503)
@@ -786,7 +796,9 @@ function Invoke-Deploy {
             Pip-Install "rapidocr[onnxruntime]" "rapidocr" | Out-Null
         }
         if ($launchEmbed) {
-            Pip-Install "fastembed" "fastembed" | Out-Null
+            Write-Host "  Installing fastembed (latest)..." -ForegroundColor Gray
+            & python -m pip install --quiet --upgrade fastembed 2>&1 | Out-Null
+            Set-Stamp "fastembed" "latest"
         }
     } else {
         Write-Host "[6/8] No ONNX packages needed for chat mode." -ForegroundColor Gray
