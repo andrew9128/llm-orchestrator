@@ -618,7 +618,7 @@ function Write-LlmWatchdog($path) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM DEPLOY v15.5 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM DEPLOY v15.6 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
     Write-Host "    ONNX-native stack: no PyTorch for special services" -ForegroundColor Gray
 
     Invoke-Stop
@@ -735,7 +735,21 @@ function Invoke-Deploy {
     # [5] LLM model
     # ------------------------------------------------------------------
     Write-Host "[5/8] Selecting LLM (mode=$Mode, vram=$totalVram MiB)..." -ForegroundColor Yellow
-    $candidate = Select-BestModel $totalVram $Mode
+    $modelMap = @{
+        "t-lite-2.1"  = @{ template="qwen";   prompt="Ты полезный помощник. Отвечай только на русском языке. Если я попрошу подумать шаг за шагом, объяснить подробно или решить сложную задачу — используй формат <think>твои рассуждения здесь</think> перед финальным ответом. В обычных простых вопросах отвечай сразу, без <think> тегов и без лишних объяснений." }
+        "t-pro-2.0"   = @{ template="qwen";   prompt="Ты полезный помощник. Отвечай только на русском языке. Если я попрошу подумать шаг за шагом, объяснить подробно или решить сложную задачу — используй формат <think>твои рассуждения здесь</think> перед финальным ответом. В обычных простых вопросах отвечай сразу, без <think> тегов и без лишних объяснений." }
+        "saiga-gem12" = @{ template="gemma";  prompt="Ты полезный помощник. Отвечай только на русском языке. Если я попрошу подумать шаг за шагом, объяснить подробно или решить сложную задачу — используй формат <think>твои рассуждения здесь</think> перед финальным ответом. В обычных простых вопросах отвечай сразу, без <think> тегов и без лишних объяснений." }
+        "saiga-nem12" = @{ template="llama3"; prompt="Ты полезный помощник. Отвечай только на русском языке. Если я попрошу подумать шаг за шагом, объяснить подробно или решить сложную задачу — используй формат <think>твои рассуждения здесь</think> перед финальным ответом. В обычных простых вопросах отвечай сразу, без <think> тегов и без лишних объяснений." }
+        "yagpt-8b"    = @{ template="llama3"; prompt="Ты полезный помощник. Отвечай только на русском языке. Если я попрошу подумать шаг за шагом, объяснить подробно или решить сложную задачу — используй формат <think>твои рассуждения здесь</think> перед финальным ответом. В обычных простых вопросах отвечай сразу, без <think> тегов и без лишних объяснений." }
+        "qvikhr-4b"   = @{ template="qwen";   prompt="Ты полезный помощник. Отвечай только на русском языке. Если я попрошу подумать шаг за шагом, объяснить подробно или решить сложную задачу — используй формат <think>твои рассуждения здесь</think> перед финальным ответом. В обычных простых вопросах отвечай сразу, без <think> тегов и без лишних объяснений." }
+        "qvikhr-1b"   = @{ template="qwen";   prompt="Ты полезный помощник. Отвечай только на русском языке. Если я попрошу подумать шаг за шагом, объяснить подробно или решить сложную задачу — используй формат <think>твои рассуждения здесь</think> перед финальным ответом. В обычных простых вопросах отвечай сразу, без <think> тегов и без лишних объяснений." }
+        "kodify-2b"   = @{ template="qwen";   prompt="Ты полезный кодер-помощник. Отвечай только на русском языке. Если я попрошу подумать шаг за шагом — используй <think>твои рассуждения здесь</think>." }
+    }
+
+    $base = ($candidate.name -split "-q[0-9]")[0]          # t-lite-2.1, saiga-gem12 и т.д.
+    $cfg = if ($modelMap.ContainsKey($base)) { $modelMap[$base] } else { $modelMap["t-lite-2.1"] }
+    $chatTemplate = $cfg.template
+    $systemPrompt = $cfg.prompt
     $ctxSize   = Get-CtxSize $totalVram
     Write-Host "  Selected: $($candidate.name) | minVram: $($candidate.minVram)MB | ctx: $ctxSize" -ForegroundColor Cyan
 
@@ -832,7 +846,7 @@ function Invoke-Deploy {
     $cfgObj | ConvertTo-Json -Depth 5 | Out-File "$W\config.json" -Encoding UTF8 -NoNewline
 
     # LLM
-    $cmd = "Set-Location `"$binDir`"; .\llama-server.exe --model `"$m`" --port 8010 --n-gpu-layers 99 --ctx-size $ctxSize --host 0.0.0.0 $deviceArg --no-warmup > `"$W\server.log`" 2>&1"
+    $cmd = "Set-Location `"$binDir`"; .\llama-server.exe --model `"$m`" --port 8010 --n-gpu-layers 99 --ctx-size $ctxSize --host 0.0.0.0 $deviceArg --chat-template $chatTemplate --system-prompt `"$systemPrompt`" --no-warmup > `"$W\server.log`" 2>&1"
     [System.IO.File]::WriteAllText("$W\run.ps1", $cmd, [System.Text.UTF8Encoding]::new($false))
     Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\run.ps1"
 
