@@ -790,7 +790,7 @@ function Invoke-Deploy {
         }
         if ($launchEmbed) {
             Write-Host "  Installing fastembed (latest)..." -ForegroundColor Gray
-            & python -m pip install --quiet --upgrade fastembed 2>&1 | Out-Null
+            & python -m pip install --quiet --upgrade fastembed-gpu 2>&1 | Out-Null
             Set-Stamp "fastembed" "latest"
         }
     } else {
