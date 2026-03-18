@@ -1,4 +1,3 @@
-# LLM WIN DEPLOY v15.0
 # Clean rewrite. All special services use ONNX Runtime - no PyTorch dependency.
 #
 # Modes:
@@ -33,10 +32,10 @@ $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $W = "$env:USERPROFILE\llm_native"
 
-$IDLE_LLM   = 600
-$IDLE_ASR   = 300
-$IDLE_OCR   = 300
-$IDLE_EMBED = 900
+$IDLE_LLM   = 6
+$IDLE_ASR   = 3
+$IDLE_OCR   = 3
+$IDLE_EMBED = 9
 
 # =============================================================================
 # STOP
@@ -589,7 +588,7 @@ function Write-ProxyScript {
 # =============================================================================
 function Write-LlmWatchdog($path) {
     $lines = @(
-        '# LLM Watchdog v15.4 - monitors LLM only, proxy processes run separately'
+        '# LLM Watchdog - monitors LLM only, proxy processes run separately'
         '$ProgressPreference = "SilentlyContinue"'
         '$W = "$env:USERPROFILE\llm_native"'
         '$log = "$W\watchdog.log"'
@@ -608,7 +607,7 @@ function Write-LlmWatchdog($path) {
         '    } catch { return "down" }'
         '}'
         ''
-        'L "Watchdog v15.2 started."'
+        'L "Watchdog started."'
         '$fail=0; $up=$false'
         'while($true) {'
         '    Start-Sleep -s 15'
@@ -649,7 +648,7 @@ function Write-LlmWatchdog($path) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM DEPLOY v15.6 (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM DEPLOY (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
     Write-Host "    ONNX-native stack: no PyTorch for special services" -ForegroundColor Gray
 
     Invoke-Stop
@@ -870,7 +869,7 @@ function Invoke-Deploy {
     [System.IO.File]::WriteAllText("$W\run.ps1", $cmd, [System.Text.UTF8Encoding]::new($false))
     Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\run.ps1"
 
-    $llmReady = Wait-ServiceReady 18010 "LLM" 600
+    $llmReady = Wait-ServiceReady 18010 "LLM" 6
     if (-not $llmReady) {
         Write-Host "FAILED to start LLM. Log:" -ForegroundColor Red
         if (Test-Path "$W\server.log") { Get-Content "$W\server.log" -Tail 20 }
@@ -979,7 +978,7 @@ function Invoke-Deploy {
     Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-ExecutionPolicy", "Bypass", "-File", $wdScript
 
     Write-Host ""
-    Write-Host "SUCCESS - LLM Orchestrator v15.0" -ForegroundColor Green
+    Write-Host "SUCCESS - LLM Orchestrator" -ForegroundColor Green
     Write-Host "  Mode:    $Mode"                                         -ForegroundColor Green
     Write-Host "  Model:   $($candidate.name)"                           -ForegroundColor Green
     Write-Host "  GPUs:    $deviceList ($totalVram MiB)"                 -ForegroundColor Green
