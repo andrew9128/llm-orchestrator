@@ -228,6 +228,9 @@ function Write-AsrService {
 import json, base64, tempfile, os, threading, soundfile as sf
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import onnx_asr
+import time
+IDLE_TIMEOUT = 300
+last_req = [time.time()]
 _model = [None]
 def _load():
     _model[0] = onnx_asr.load_model('gigaam-v3-e2e-rnnt')
@@ -260,6 +263,7 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
         self.wfile.write(json.dumps({'status': st}).encode())
     def do_POST(self):
+        last_req[0] = time.time()
         n = int(self.headers.get('Content-Length', 0))
         body = json.loads(self.rfile.read(n))
         audio = base64.b64decode(body.get('audio',''))
@@ -272,6 +276,12 @@ class H(BaseHTTPRequestHandler):
             if os.path.exists(tmp): os.unlink(tmp)
         self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8'); self.end_headers()
         self.wfile.write(json.dumps({'text': text}, ensure_ascii=False).encode('utf-8'))
+def watcher():
+    while True:
+        time.sleep(30)
+        if time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)
+threading.Thread(target=watcher, daemon=True).start()
+
 HTTPServer(('0.0.0.0', 18011), H).serve_forever()
 "@
     $script | Out-File "$W\asr_service.py" -Encoding UTF8
@@ -356,6 +366,9 @@ function Write-EmbedService {
 import json, threading, traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
 _model = [None]; _err = [None]
+import time
+IDLE_TIMEOUT = $IDLE_EMBED
+last_req = [time.time()]
 def _load():
     try:
         from fastembed import TextEmbedding
@@ -376,6 +389,7 @@ class H(BaseHTTPRequestHandler):
         self.send_header('Content-Type','application/json'); self.end_headers()
         self.wfile.write(json.dumps({'status': st}).encode())
     def do_POST(self):
+        last_req[0] = time.time()
         if not _model[0]:
             self.send_response(503); self.send_header('Content-Type','application/json'); self.end_headers()
             self.wfile.write(json.dumps({'error': _err[0] or 'loading'}).encode()); return
@@ -394,6 +408,12 @@ class H(BaseHTTPRequestHandler):
             self.send_response(500); self.send_header('Content-Type','application/json')
             self.send_header('Content-Length', str(len(msg))); self.end_headers()
             self.wfile.write(msg)
+def watcher():
+    while True:
+        time.sleep(60)
+        if _model[0] and time.time() - last_req[0] > IDLE_TIMEOUT: os._exit(0)
+threading.Thread(target=watcher, daemon=True).start()
+
 HTTPServer(('0.0.0.0', 18014), H).serve_forever()
 "@
     $script | Out-File "$W\embed_service.py" -Encoding UTF8
