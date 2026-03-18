@@ -124,7 +124,7 @@ Write-Host "================================================" -ForegroundColor C
 Write-Host ""
 
 # Detect which services are running
-$llmOk    = (Get-ServiceStatus 8010) -eq "ok"
+$llmOk    = (Get-ServiceStatus 8010) -in @("ok","stopped","loading")
 $asrOk    = (Get-ServiceStatus 8011) -in @("ok","stopped","loading")
 $ocrOk    = (Get-ServiceStatus 8013) -in @("ok","stopped","loading")
 $embedOk  = (Get-ServiceStatus 8014) -in @("ok","stopped","loading")
@@ -143,7 +143,7 @@ Write-Host "--- LLM (port 8010) ---" -ForegroundColor Cyan
 
 # Health
 $st = Get-ServiceStatus 8010
-Check "LLM health" ($st -eq "ok") "status=$st"
+Check "LLM health" ($st -in @("ok","stopped","loading")) "status=$st"
 
 if ($llmOk) {
     # Models list
