@@ -57,7 +57,7 @@ function Invoke-Stop {
     } | ForEach-Object {
         Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue
     }
-    foreach ($port in 8010, 8011, 8013, 8014, 18011, 18013, 18014) {
+    foreach ($port in 8010, 8011, 8013, 8014, 18010, 18011, 18013, 18014) {
         try {
             $conn = Get-NetTCPConnection -LocalPort $port -EA SilentlyContinue | Where-Object State -eq "Listen" | Select-Object -First 1
             if ($conn -and $conn.OwningProcess -gt 4) {
@@ -597,7 +597,7 @@ function Write-LlmWatchdog($path) {
         ''
         'function Get-LlmSt {'
         '    try {'
-        '        $r=[System.Net.HttpWebRequest]::Create("http://localhost:8010/health")'
+        '        $r=[System.Net.HttpWebRequest]::Create("http://localhost:18010/health")'
         '        $r.Timeout=3000; $r.Method="GET"'
         '        try {'
         '            $rsp=$r.GetResponse()'
@@ -866,21 +866,28 @@ function Invoke-Deploy {
     $cfgObj | ConvertTo-Json -Depth 5 | Out-File "$W\config.json" -Encoding UTF8 -NoNewline
 
     # LLM
-    $cmd = "Set-Location `"$binDir`"; .\llama-server.exe --model `"$m`" --port 8010 --n-gpu-layers 99 --ctx-size $ctxSize --host 0.0.0.0 $deviceArg --alias `"$($candidate.name)`" --no-warmup > `"$W\server.log`" 2>&1"
+    $cmd = "Set-Location `"$binDir`"; .\llama-server.exe --model `"$m`" --port 18010 --n-gpu-layers 99 --ctx-size $ctxSize --host 0.0.0.0 $deviceArg --alias `"$($candidate.name)`" --no-warmup > `"$W\server.log`" 2>&1"
     [System.IO.File]::WriteAllText("$W\run.ps1", $cmd, [System.Text.UTF8Encoding]::new($false))
     Start-Process "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-File", "$W\run.ps1"
 
-    $llmReady = Wait-ServiceReady 8010 "LLM" 600
+    $llmReady = Wait-ServiceReady 18010 "LLM" 600
     if (-not $llmReady) {
         Write-Host "FAILED to start LLM. Log:" -ForegroundColor Red
         if (Test-Path "$W\server.log") { Get-Content "$W\server.log" -Tail 20 }
         exit 1
     }
 
-    # Write service scripts
+    Write-ProxyScript
+    $proxyScript = "$W\proxy_service.py"
+    $runLlm = "import subprocess, sys`nsubprocess.run([r'$($exePath -replace '\\','\\\\')','--model',r'$($m -replace '\\','\\\\')','--port','18010','--n-gpu-layers','99','--ctx-size','$ctxSize','--host','0.0.0.0','--alias','$($candidate.name)','--no-warmup'])"
+    $runLlm | Out-File "$W\run_llm.py" -Encoding UTF8
+
     if ($launchAsr)   { Write-AsrService }
     if ($launchOcr)   { Write-OcrService }
     if ($launchEmbed) { Write-EmbedService }
+
+    Start-Process "python" -ArgumentList $proxyScript, "8010", "18010", "LLM", "$W\run_llm.py", $W `
+        -WindowStyle Hidden -RedirectStandardOutput "$W\proxy_8010.log" -RedirectStandardError "$W\proxy_8010_err.log"
 
     # Start special services simultaneously
     $svcPorts = @{}
@@ -949,6 +956,9 @@ function Invoke-Deploy {
 
     # Start proxy processes
     Write-ProxyScript
+    $runLlm = "import subprocess, sys`nsubprocess.run([r'$($exePath -replace '\\','\\\\')','--model',r'$($m -replace '\\','\\\\')','--port','18010','--n-gpu-layers','99','--ctx-size','$ctxSize','--host','0.0.0.0','--alias','$($candidate.name)','--no-warmup'])"
+    $runLlm | Out-File "$W\run_llm.py" -Encoding UTF8
+
     $proxyScript = "$W\proxy_service.py"
     if ($launchAsr) {
         Start-Process "python" -ArgumentList $proxyScript, "8011", "18011", "ASR", "$W\asr_service.py", $W `
