@@ -225,28 +225,48 @@ function Select-BestModel($vramMb, $deployMode) {
 # =============================================================================
 function Write-AsrService {
     $script = @"
-import sys, json, base64, tempfile, os
+import json, base64, tempfile, os, threading, soundfile as sf
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import onnx_asr
-model = onnx_asr.load_model('gigaam-v3-e2e-rnnt')
+_model = [None]
+def _load():
+    _model[0] = onnx_asr.load_model('gigaam-v3-e2e-rnnt')
+threading.Thread(target=_load, daemon=True).start()
+def transcribe(path):
+    m = _model[0]
+    audio, sr = sf.read(path, dtype='float32', always_2d=False)
+    if audio.ndim > 1: audio = audio.mean(axis=1)
+    for fn, args in [
+        (getattr(m,'recognize',None), (audio,)),
+        (getattr(m,'recognize',None), (audio, sr)),
+        (getattr(m,'transcribe',None), (audio,)),
+        (getattr(m,'transcribe_file',None), (path,)),
+        (m if callable(m) else None, (audio,)),
+        (m if callable(m) else None, (path,)),
+    ]:
+        if fn is None: continue
+        try:
+            r = fn(*args)
+            if isinstance(r, str): return r
+            if hasattr(r, 'text'): return r.text
+            if hasattr(r, '__iter__'):
+                return ' '.join(x.text for x in r if hasattr(x,'text'))
+        except (TypeError, AttributeError): continue
+    return 'ERROR: no API. methods=' + str([x for x in dir(m) if not x.startswith('_')])
 class H(BaseHTTPRequestHandler):
     def log_message(self, f, *a): pass
     def do_GET(self):
+        st = 'ok' if _model[0] else 'loading'
         self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
-        self.wfile.write(json.dumps({'status':'ok'}).encode())
+        self.wfile.write(json.dumps({'status': st}).encode())
     def do_POST(self):
         n = int(self.headers.get('Content-Length', 0))
         body = json.loads(self.rfile.read(n))
-        audio = base64.b64decode(body['audio'])
+        audio = base64.b64decode(body.get('audio',''))
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
             f.write(audio); tmp = f.name
         try:
-            res = model(tmp)
-            if hasattr(res, '__iter__') and not hasattr(res, 'text'):
-                texts = [r.text for r in res if hasattr(r, 'text')]
-                text = ' '.join(texts)
-            else:
-                text = res.text if hasattr(res, 'text') else str(res)
+            text = transcribe(tmp) if _model[0] else 'ERROR: loading'
         except Exception as e: text = 'ERROR: ' + str(e)
         finally:
             if os.path.exists(tmp): os.unlink(tmp)
@@ -331,61 +351,48 @@ function Write-OcrService {
 }
 
 function Write-EmbedService {
-    $lines = @(
-        "import sys, json, os, traceback",
-        "from http.server import HTTPServer, BaseHTTPRequestHandler",
-        "",
-        "_model = [None]",
-        "_err   = [None]",
-        "",
-        "def _load():",
-        "    try:",
-        "        from sentence_transformers import SentenceTransformer",
-        "        try:",
-        "            _model[0] = SentenceTransformer('BAAI/bge-m3', backend='onnx')",
-        "            print('Embed: ONNX backend', flush=True)",
-        "        except Exception:",
-        "            _model[0] = SentenceTransformer('BAAI/bge-m3')",
-        "            print('Embed: default backend (ONNX unavailable)', flush=True)",
-        "    except Exception as e:",
-        "        _err[0] = str(e)",
-        "        print(f'Embed load error: {e}', file=sys.stderr, flush=True)",
-        "",
-        "import threading",
-        "threading.Thread(target=_load, daemon=True).start()",
-        "",
-        "class H(BaseHTTPRequestHandler):",
-        "    def log_message(self, f, *a): pass",
-        "    def do_GET(self):",
-        "        st = 'ok' if _model[0] else ('error: ' + _err[0] if _err[0] else 'loading')",
-        "        code = 200 if _model[0] else 503",
-        "        self.send_response(code)",
-        "        self.send_header('Content-Type','application/json'); self.end_headers()",
-        "        self.wfile.write(json.dumps({'status': st}).encode())",
-        "    def do_POST(self):",
-        "        if not _model[0]:",
-        "            self.send_response(503); self.send_header('Content-Type','application/json'); self.end_headers()",
-        "            self.wfile.write(json.dumps({'error': _err[0] or 'loading'}).encode()); return",
-        "        try:",
-        "            n = int(self.headers.get('Content-Length', 0))",
-        "            texts = json.loads(self.rfile.read(n))['input']",
-        "            if isinstance(texts, str): texts = [texts]",
-        "            vecs = _model[0].encode(texts, normalize_embeddings=True)",
-        "            if hasattr(vecs, 'tolist'): vecs = vecs.tolist()",
-        "            data = [{'index': i, 'embedding': v} for i, v in enumerate(vecs)]",
-        "            out = json.dumps({'object':'list','data':data}, ensure_ascii=False).encode('utf-8')",
-        "            self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8')",
-        "            self.send_header('Content-Length', str(len(out))); self.end_headers()",
-        "            self.wfile.write(out)",
-        "        except Exception as e:",
-        "            msg = json.dumps({'error': traceback.format_exc()}).encode()",
-        "            self.send_response(500); self.send_header('Content-Type','application/json')",
-        "            self.send_header('Content-Length', str(len(msg))); self.end_headers()",
-        "            self.wfile.write(msg)",
-        "",
-        "HTTPServer(('0.0.0.0', 18014), H).serve_forever()"
-    )
-    $lines -join "`n" | Out-File "$W\embed_service.py" -Encoding UTF8 -NoNewline
+    $script = @"
+import json, threading, traceback
+from http.server import HTTPServer, BaseHTTPRequestHandler
+_model = [None]; _err = [None]
+def _load():
+    try:
+        from fastembed import TextEmbedding
+        _model[0] = TextEmbedding('BAAI/bge-m3')
+        print('Embed: fastembed BGE-M3 ready', flush=True)
+    except Exception as e:
+        _err[0] = str(e)
+        print(f'Embed error: {e}', flush=True)
+threading.Thread(target=_load, daemon=True).start()
+class H(BaseHTTPRequestHandler):
+    def log_message(self, f, *a): pass
+    def do_GET(self):
+        st = 'ok' if _model[0] else ('error: '+_err[0] if _err[0] else 'loading')
+        self.send_response(200 if _model[0] else 503)
+        self.send_header('Content-Type','application/json'); self.end_headers()
+        self.wfile.write(json.dumps({'status': st}).encode())
+    def do_POST(self):
+        if not _model[0]:
+            self.send_response(503); self.send_header('Content-Type','application/json'); self.end_headers()
+            self.wfile.write(json.dumps({'error': _err[0] or 'loading'}).encode()); return
+        try:
+            n = int(self.headers.get('Content-Length', 0))
+            texts = json.loads(self.rfile.read(n))['input']
+            if isinstance(texts, str): texts = [texts]
+            vecs = list(_model[0].embed(texts))
+            data = [{'index': i, 'embedding': v.tolist()} for i, v in enumerate(vecs)]
+            out = json.dumps({'object':'list','data':data}, ensure_ascii=False).encode('utf-8')
+            self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(out))); self.end_headers()
+            self.wfile.write(out)
+        except Exception as e:
+            msg = json.dumps({'error': traceback.format_exc()}).encode()
+            self.send_response(500); self.send_header('Content-Type','application/json')
+            self.send_header('Content-Length', str(len(msg))); self.end_headers()
+            self.wfile.write(msg)
+HTTPServer(('0.0.0.0', 18014), H).serve_forever()
+"@
+    $script | Out-File "$W\embed_service.py" -Encoding UTF8
 }
 
 # =============================================================================
@@ -773,13 +780,13 @@ function Invoke-Deploy {
 
         if ($launchAsr) {
             Pip-Install "onnx-asr" "onnx_asr" | Out-Null
+            Pip-Install "soundfile" "soundfile" | Out-Null
         }
         if ($launchOcr) {
             Pip-Install "rapidocr[onnxruntime]" "rapidocr" | Out-Null
         }
         if ($launchEmbed) {
-            Pip-Install "sentence-transformers" "sentence_transformers" | Out-Null
-            Pip-Install "optimum[onnxruntime]" "optimum" | Out-Null
+            Pip-Install "fastembed" "fastembed" | Out-Null
         }
     } else {
         Write-Host "[6/8] No ONNX packages needed for chat mode." -ForegroundColor Gray
