@@ -774,13 +774,6 @@ function Invoke-Deploy {
     # ------------------------------------------------------------------
     if ($launchAsr -or $launchOcr -or $launchEmbed) {
         Write-Host "[6/8] ONNX packages..." -ForegroundColor Yellow
-
-        $orVer = Pip-Install "onnxruntime-gpu" "onnxruntime_gpu"
-        if (-not $orVer) {
-            Write-Host "  onnxruntime-gpu failed, trying CPU fallback..." -ForegroundColor Yellow
-            Pip-Install "onnxruntime" "onnxruntime" | Out-Null
-        }
-
         if ($launchAsr) {
             Pip-Install "onnx-asr" "onnx_asr" | Out-Null
             Pip-Install "soundfile" "soundfile" | Out-Null
@@ -788,15 +781,18 @@ function Invoke-Deploy {
         if ($launchOcr) {
             Pip-Install "rapidocr[onnxruntime]" "rapidocr" | Out-Null
         }
-        if ($launchEmbed) {
-            Write-Host "  Installing fastembed (latest)..." -ForegroundColor Gray
-            & python -m pip install --quiet --upgrade fastembed-gpu 2>&1 | Out-Null
-            Set-Stamp "fastembed" "latest"
+        # onnxruntime-gpu и fastembed-gpu - всегда последними,
+        # чтобы зависимости выше не перезаписали CPU-версиями
+        $orVer = Pip-Install "onnxruntime-gpu" "onnxruntime_gpu"
+        if (-not $orVer) {
+            Pip-Install "onnxruntime" "onnxruntime" | Out-Null
         }
-    } else {
-        Write-Host "[6/8] No ONNX packages needed for chat mode." -ForegroundColor Gray
+        if ($launchEmbed) {
+            Write-Host "  Installing fastembed-gpu (latest)..." -ForegroundColor Gray
+            & python -m pip install --quiet --upgrade fastembed-gpu 2>&1 | Out-Null
+            Set-Stamp "fastembed" "gpu"
+        }
     }
-
     # ------------------------------------------------------------------
     # [7] Download ONNX model files
     # ------------------------------------------------------------------
