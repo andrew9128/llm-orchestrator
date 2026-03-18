@@ -358,134 +358,143 @@ GPU 1: saiga_nemo_12b (vllm) - порт 8001
 
 Все команды выполняются в **PowerShell от имени администратора**.
 
+> Используется `Invoke-WebRequest` для корректного отображения кириллицы.
+
 ```powershell
-# Запуск (установка + загрузка + старт)
-$f="$env:TEMP\s.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1"; powershell -ExecutionPolicy Bypass -File $f
+# Деплой (установка + загрузка + старт) — режим chat по умолчанию
+$f="$env:TEMP\s.ps1"; (Invoke-WebRequest "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1" -UseBasicParsing).Content | Set-Content $f -Encoding UTF8; powershell -NoProfile -ExecutionPolicy Bypass -File $f
+
+# Деплой с режимом full (LLM + ASR + OCR + Embed)
+$f="$env:TEMP\s.ps1"; (Invoke-WebRequest "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1" -UseBasicParsing).Content | Set-Content $f -Encoding UTF8; powershell -NoProfile -ExecutionPolicy Bypass -File $f -Mode full
 
 # Статус
-$f="$env:TEMP\s.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1"; powershell -ExecutionPolicy Bypass -File $f --status
+$f="$env:TEMP\s.ps1"; (Invoke-WebRequest "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1" -UseBasicParsing).Content | Set-Content $f -Encoding UTF8; powershell -NoProfile -ExecutionPolicy Bypass -File $f --status
 
 # Остановка
-$f="$env:TEMP\s.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1"; powershell -ExecutionPolicy Bypass -File $f --stop
+$f="$env:TEMP\s.ps1"; (Invoke-WebRequest "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1" -UseBasicParsing).Content | Set-Content $f -Encoding UTF8; powershell -NoProfile -ExecutionPolicy Bypass -File $f --stop
 
 # Рестарт
-$f="$env:TEMP\s.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1"; powershell -ExecutionPolicy Bypass -File $f --restart
+$f="$env:TEMP\s.ps1"; (Invoke-WebRequest "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_deploy.ps1" -UseBasicParsing).Content | Set-Content $f -Encoding UTF8; powershell -NoProfile -ExecutionPolicy Bypass -File $f --restart
 
 # Удалить всё (включая модели)
-$f="$env:TEMP\p.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_prune.ps1"; powershell -ExecutionPolicy Bypass -File $f
+$f="$env:TEMP\p.ps1"; (Invoke-WebRequest "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_prune.ps1" -UseBasicParsing).Content | Set-Content $f -Encoding UTF8; powershell -NoProfile -ExecutionPolicy Bypass -File $f
 
 # Удалить всё кроме скачанных моделей
-$f="$env:TEMP\p.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_prune.ps1"; powershell -ExecutionPolicy Bypass -File $f -KeepModels
+$f="$env:TEMP\p.ps1"; (Invoke-WebRequest "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_prune.ps1" -UseBasicParsing).Content | Set-Content $f -Encoding UTF8; powershell -NoProfile -ExecutionPolicy Bypass -File $f -KeepModels
 
-# Запрос
-$f="$env:TEMP\ask.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_ask.ps1"; powershell -ExecutionPolicy Bypass -File $f "ЗАПРОС"
+# Одиночный запрос
+$f="$env:TEMP\ask.ps1"; (Invoke-WebRequest "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_ask.ps1" -UseBasicParsing).Content | Set-Content $f -Encoding UTF8; powershell -NoProfile -ExecutionPolicy Bypass -File $f "ЗАПРОС"
 
-# Чат
-$f="$env:TEMP\chat.ps1"; curl.exe -L -o $f "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_chat.ps1"; powershell -ExecutionPolicy Bypass -File $f
+# Интерактивный чат (exit для выхода)
+$f="$env:TEMP\chat.ps1"; (Invoke-WebRequest "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_chat.ps1" -UseBasicParsing).Content | Set-Content $f -Encoding UTF8; powershell -NoProfile -ExecutionPolicy Bypass -File $f
+
+# Тесты
+$f="$env:TEMP\test.ps1"; (Invoke-WebRequest "https://raw.githubusercontent.com/andrew9128/llm-orchestrator/main/scripts/win_test.ps1" -UseBasicParsing).Content | Set-Content $f -Encoding UTF8; powershell -NoProfile -ExecutionPolicy Bypass -File $f
 ```
+
+### Параметры деплоя
 
 ```powershell
-# Лучшая одна карта (default)
-powershell -EP Bypass -File $f
+-Mode chat    # только LLM (default)
+-Mode voice   # LLM + ASR
+-Mode doc     # LLM + OCR + Embed
+-Mode full    # всё
 
-# Использовать 2 карты
-powershell -EP Bypass -File $f -Gpus 2
-
-# Все карты
-powershell -EP Bypass -File $f -Gpus all
-
-# Конкретно одна
-powershell -EP Bypass -File $f -Gpus 1
+-Gpus 1       # лучшая одна карта (default)
+-Gpus 2       # две карты
+-Gpus all     # все карты
 ```
+
 ---
 
 ## Windows — логика работы
 
-### Что делает `win_deploy.ps1 --deploy`
+### Режимы и сервисы
+
+| Режим | LLM | ASR | OCR | Embed |
+|-------|:---:|:---:|:---:|:-----:|
+| `chat` | ✓ | — | — | — |
+| `voice` | ✓ | ✓ | — | — |
+| `doc` | ✓ | — | ✓ | ✓ |
+| `full` | ✓ | ✓ | ✓ | ✓ |
+
+| Сервис | Порт | Технология |
+|--------|------|------------|
+| LLM | 8010 | llama.cpp CUDA + GGUF |
+| ASR | 8011 | GigaAM-v3 ONNX |
+| OCR | 8013 | RapidOCR PP-OCRv5 ESLAV (ru+en) |
+| Embed | 8014 | multilingual-e5-large ONNX |
+
+### Wake-on-demand
+
+Все сервисы работают по схеме **сон → пробуждение по запросу → сон после простоя**.  
+GPU память освобождается когда сервис не используется.
 
 ```
-[1/7] System dependencies
-      ├── VCRedist 2015+ (winget)
-      └── Python 3.12 (winget, если не установлен)
+запрос → прокси (всегда alive) → сервис спит?
+                               → запускает сервис
+                               → ждёт готовности
+                               → проксирует запрос
 
-[2/7] CUDA DLLs + pip
-      ├── nvidia-cuda-runtime-cu12  → cudart64_12.dll
-      ├── nvidia-cublas-cu12        → cublas64_12.dll, cublasLt64_12.dll
-      ├── nvidia-cuda-nvrtc-cu12    → nvrtc64_*.dll
-      └── huggingface-hub           → для скачивания моделей без LFS проблем
-
-[3/7] llama.cpp engine
-      ├── Скачивает CUDA 12.4 билд (~190MB)
-      └── Копирует все .dll рядом с llama-server.exe
-
-[4/7] Тест движка
-      ├── CUDA OK  → используем
-      └── CUDA fail → скачивает Vulkan билд (~25MB) как fallback
-
-[5/7] Определение GPU
-      ├── --list-devices парсит доступные устройства
-      ├── Предпочитает RTX > GTX
-      └── Среди равных — больший VRAM
-
-[6/7] Выбор модели и квантования (quality-first)
-      └── (см. таблицу ниже)
-
-[7/7] Запуск сервера
-      ├── Сохраняет команду в ~/llm_native/run.ps1
-      ├── Запускает llama-server в скрытом окне
-      ├── Поллит /health каждые 3 сек до 240 сек
-      └── Запускает watchdog в фоне
+нет запросов N секунд → сервис убивается → GPU свободна
+следующий запрос      → снова пробуждается
 ```
 
----
+| Сервис | Idle timeout |
+|--------|-------------|
+| LLM | 600s (10 мин) |
+| ASR | 300s (5 мин) |
+| OCR | 300s (5 мин) |
+| Embed | 900s (15 мин) |
 
-### Выбор модели и квантования
+### Что делает `win_deploy.ps1`
+
+```
+[1/8] System dependencies    — VCRedist, Python 3.12
+[2/8] CUDA DLLs              — nvidia-cuda-runtime/cublas/nvrtc
+[3/8] llama-server engine    — CUDA 12.4 build, fallback Vulkan
+[4/8] GPU detection          — выбирает лучшие GPU по VRAM
+[5/8] Model selection        — подбирает модель и квант под VRAM
+[6/8] ONNX packages          — onnx-asr, rapidocr, fastembed-gpu
+[7/8] ONNX model files       — предзагрузка GigaAM-v3
+[8/8] Start proxies          — запускает прокси для каждого сервиса
+```
+
+### Выбор модели
 
 | VRAM | Модель | Quant | Контекст |
-|------|--------|-------|----------|
-| 32GB+ | saiga-nemo-12b | q8_0 | 32768 |
-| 22GB+ | saiga-nemo-12b | q8_0 | 24576 |
-| 14GB+ | saiga-nemo-12b | q6_K | 16384 |
-| 11GB+ | saiga-nemo-12b | q6_K | 8192 |
-| 9.5GB+ | qvikhr-8b / saiga-8b | q6_K | 16384 |
-| 8.5GB+ | saiga-mistral-7b | q6_K | 8192 |
-| 6.8GB+ | qvikhr-4b | q8_0 | 8192 |
-| 5.5GB+ | qvikhr-4b | q6_K | 8192 |
-| 4.5GB+ | qvikhr-4b | q5_K | 8192 |
-| 3.5GB+ | qvikhr-1.7b | q8_0 | 8192 |
-| 2.5GB+ | qvikhr-1.7b | q6_K | 4096 |
-| 1.8GB+ | qvikhr-1.7b | q4_K | 2048 |
-
----
-
-### Watchdog
-
-Запускается автоматически после деплоя. Работает в фоне бесконечно.
-
-```
-Каждые 10 сек     → проверяет /health
-2 падения подряд  → убивает и перезапускает сервер
-4+ падения        → уменьшает --ctx-size вдвое и перезапускает
-                    32768 → 16384 → 8192 → 4096 → 2048
-```
-
-Лог: `%USERPROFILE%\llm_native\watchdog.log`
-
----
+|------|--------|-------|---------|
+| 36GB+ | t-pro-2.0 | q8 | 32768 |
+| 27GB+ | t-pro-2.0 | q6 | 24576 |
+| 23GB+ | t-pro-2.0 | q5 | 24576 |
+| 19GB+ | t-pro-2.0 | q4 | 16384 |
+| 14.5GB+ | saiga-gemma3-12b | q8 | 16384 |
+| 11GB+ | saiga-gemma3-12b | q6 | 16384 |
+| 10GB+ | t-lite-2.1 | q8 | 16384 |
+| 9.5GB+ | saiga-gemma3-12b | q5 | 8192 |
+| 8.2GB+ | t-lite-2.1 | q6 | 8192 |
+| 7.8GB+ | saiga-gemma3-12b | q4 | 8192 |
+| 6.5GB+ | t-lite-2.1 | q5 | 8192 |
+| 5.2GB+ | t-lite-2.1 | q4 | 8192 |
+| 3.4GB+ | qvikhr-4b | q4 | 8192 |
+| 1.8GB+ | qvikhr-1b | q4 | 8192 |
 
 ### Файловая структура
 
 ```
 %USERPROFILE%\llm_native\
-├── bin\            # CUDA движок (llama-server.exe + все DLL)
-├── bin_vulkan\     # Vulkan движок (fallback)
-├── cuda_dlls\      # CUDA DLL из pip
-├── models\         # .gguf модели (кешируются, повторно не качаются)
-├── run.ps1         # Команда запуска (перегенерируется при деплое)
-├── watchdog.ps1    # Watchdog (скачивается из репо)
-├── server.log      # Лог llama-server
-└── watchdog.log    # Лог watchdog
+├── bin\              # CUDA движок (llama-server.exe + DLL)
+├── bin_vulkan\       # Vulkan движок (fallback)
+├── cuda_dlls\        # CUDA DLL из pip
+├── models\           # .gguf модели (кешируются)
+├── run.ps1           # Команда запуска LLM
+├── run_llm.py        # Python-обёртка для прокси
+├── proxy_service.py  # Универсальный прокси (wake-on-demand)
+├── asr_service.py    # ASR сервис
+├── ocr_service.py    # OCR сервис
+├── embed_service.py  # Embed сервис
+├── config.json       # Конфигурация деплоя
+├── server.log        # Лог llama-server
+└── watchdog.log      # Лог прокси и событий
 ```
-
----
 
