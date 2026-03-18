@@ -79,7 +79,7 @@ function Invoke-Stop {
 # =============================================================================
 function Invoke-Status {
     Write-Host "--- LLM ORCHESTRATOR STATUS ---" -ForegroundColor Cyan
-    $portMap = @{ 8010="LLM"; 8011="ASR (GigaAM-v3 ONNX)"; 8013="OCR (RapidOCR ONNX)"; 8014="Embed (BGE-M3 ONNX)" }
+    $portMap = @{ 8010="LLM"; 8011="ASR (GigaAM-v3 ONNX)"; 8013="OCR (RapidOCR ONNX)"; 8014="Embed (multilingual-e5 ONNX)" }
     foreach ($port in 8010, 8011, 8013, 8014) {
         $name = $portMap[$port]
         $st = ""
@@ -358,24 +358,17 @@ _model = [None]; _err = [None]
 def _load():
     try:
         from fastembed import TextEmbedding
-        _model[0] = TextEmbedding('BAAI/bge-m3')
-        print('Embed: fastembed BGE-M3 ready', flush=True)
+        _model[0] = TextEmbedding(
+            'intfloat/multilingual-e5-large',
+            providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+        )
+        print('Embed: multilingual-e5-large CUDA ready', flush=True)
     except Exception as e:
         _err[0] = str(e)
         print(f'Embed error: {e}', flush=True)
 threading.Thread(target=_load, daemon=True).start()
 class H(BaseHTTPRequestHandler):
     def log_message(self, f, *a): pass
-    def _load():
-        try:
-            from fastembed import TextEmbedding
-            supported = [m['model'] for m in TextEmbedding.list_supported_models()]
-            name = 'BAAI/bge-m3' if 'BAAI/bge-m3' in supported else supported[0]
-            _model[0] = TextEmbedding(name)
-            print(f'Embed: {name} ready', flush=True)
-        except Exception as e:
-            _err[0] = str(e)
-            print(f'Embed error: {e}', flush=True)
     def do_GET(self):
         st = 'ok' if _model[0] else ('error: '+_err[0] if _err[0] else 'loading')
         self.send_response(200 if _model[0] else 503)
@@ -963,7 +956,7 @@ function Invoke-Deploy {
     Write-Host "  LLM:     http://localhost:8010/v1"                     -ForegroundColor Green
     if ($launchAsr)   { Write-Host "  ASR:     http://localhost:8011  (GigaAM-v3 ONNX)"  -ForegroundColor Cyan }
     if ($launchOcr)   { Write-Host "  OCR:     http://localhost:8013  (RapidOCR ONNX)"   -ForegroundColor Cyan }
-    if ($launchEmbed) { Write-Host "  Embed:   http://localhost:8014  (BGE-M3 ONNX)"     -ForegroundColor Cyan }
+    if ($launchEmbed) { Write-Host "  Embed:   http://localhost:8014  (multilingual-e5-large ONNX)"     -ForegroundColor Cyan }
     Write-Host ""
     Write-Host ("  Idle timeouts: LLM={0}s  ASR={1}s  OCR={2}s  Embed={3}s" -f $IDLE_LLM, $IDLE_ASR, $IDLE_OCR, $IDLE_EMBED) -ForegroundColor Gray
     Write-Host "  Stop:   powershell -EP Bypass -File win_deploy.ps1 --stop"   -ForegroundColor Gray
