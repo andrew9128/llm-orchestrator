@@ -783,9 +783,15 @@ function Invoke-Deploy {
             Pip-Install "rapidocr[onnxruntime]" "rapidocr" | Out-Null
             & python -m pip uninstall -y onnxruntime 2>&1 | Out-Null
         }
-        Write-Host "  Force-reinstalling onnxruntime-gpu..." -ForegroundColor Gray
-        & python -m pip install --quiet --force-reinstall onnxruntime-gpu 2>&1 | Out-Null
-        Set-Stamp "onnxruntime_gpu" ""  # сбросить стамп
+
+        $cudaOk = (& python -c "import onnxruntime as ort; print('ok' if 'CUDAExecutionProvider' in ort.get_available_providers() else 'no')" 2>$null).Trim()
+        if ($cudaOk -ne "ok") {
+            Write-Host "  Force-reinstalling onnxruntime-gpu (CUDA missing)..." -ForegroundColor Gray
+            & python -m pip install --quiet --force-reinstall onnxruntime-gpu 2>&1 | Out-Null
+        } else {
+            Write-Host "  onnxruntime-gpu CUDA: ok" -ForegroundColor Green
+        }
+        Set-Stamp "onnxruntime_gpu" ""
         if ($launchEmbed) {
             Write-Host "  Installing fastembed-gpu (latest)..." -ForegroundColor Gray
             & python -m pip install --quiet --upgrade fastembed-gpu 2>&1 | Out-Null
