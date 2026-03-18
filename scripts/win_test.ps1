@@ -28,6 +28,24 @@ function Check($name, $ok, $detail = "") {
     }
 }
 
+function Wake-Service($port, $label) {
+    $st = Get-ServiceStatus $port
+    if ($st -eq "ok") { return $true }
+    if ($st -notin @("stopped","loading")) { return $false }
+    Write-Host "  Waking $label..." -ForegroundColor Yellow
+    # триггер пробуждения
+    try { [System.Net.HttpWebRequest]::Create("http://localhost:$port/health").GetResponse() } catch {}
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -s 3
+        if ((Get-ServiceStatus $port) -eq "ok") {
+            Write-Host "  $label ready ($($i*3+3)s)" -ForegroundColor Green
+            return $true
+        }
+    }
+    Write-Host "  $label did not wake up" -ForegroundColor Red
+    return $false
+}
+
 function Get-ServiceStatus($port) {
     try {
         $r = [System.Net.HttpWebRequest]::Create("http://localhost:$port/health")
@@ -146,6 +164,7 @@ $st = Get-ServiceStatus 8010
 Check "LLM health" ($st -in @("ok","stopped","loading")) "status=$st"
 
 if ($llmOk) {
+    Wake-Service 8010 "LLM" | Out-Null
     # Models list
     try {
         $modReq = [System.Net.HttpWebRequest]::Create("http://localhost:8010/v1/models")
@@ -227,6 +246,7 @@ $st = Get-ServiceStatus 8013
 Check "OCR health/proxy" ($st -ne "down" -and $st -ne $null) "status=$st"
 
 if ($ocrOk) {
+    Wake-Service 8013 "OCR" | Out-Null
     # Test 1: English printed text
     $imgEn = Get-TestImage "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/release/2.7/doc/imgs_en/img_12.jpg" "English OCR"
     if ($imgEn) {
@@ -303,6 +323,7 @@ $st = Get-ServiceStatus 8011
 Check "ASR health/proxy" ($st -ne "down" -and $st -ne $null) "status=$st"
 
 if ($asrOk) {
+    Wake-Service 8011 "ASR" | Out-Null
     # Test 1: Silence WAV (service should respond without error)
     $silenceB64 = Make-WavBase64 ""
     $r = Post-Json "http://localhost:8011/v1/asr" @{ audio=$silenceB64 } 30
@@ -356,6 +377,7 @@ $st = Get-ServiceStatus 8014
 Check "Embed health/proxy" ($st -ne "down" -and $st -ne $null) "status=$st"
 
 if ($embedOk) {
+    Wake-Service 8014 "Embed" | Out-Null
     # Test 1: Basic embedding
     $r = Post-Json "http://localhost:8014/v1/embeddings" @{ input = "Привет мир" } 60
     $embedData = @(if ($r.data) { $r.data } elseif ($r.object -eq "list") { $r.data })
