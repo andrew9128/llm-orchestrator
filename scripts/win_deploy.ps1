@@ -180,6 +180,25 @@ function Get-CtxSize($vramMb) {
     return 8192
 }
 
+function Get-FreeSpaceGb($path) {
+    try {
+        $drive = (Split-Path $path -Qualifier).TrimEnd(':')
+        $d = Get-PSDrive -Name $drive -EA SilentlyContinue
+        if ($d -and $d.Free) { return [math]::Round($d.Free / 1GB, 1) }
+        $wmi = Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='${drive}:'" -EA SilentlyContinue
+        if ($wmi) { return [math]::Round($wmi.FreeSpace / 1GB, 1) }
+    } catch {}
+    return 999
+}
+
+function Get-FreeRamGb {
+    try {
+        $os = Get-WmiObject Win32_OperatingSystem -EA SilentlyContinue
+        if ($os) { return [math]::Round($os.FreePhysicalMemory / 1MB, 1) }
+    } catch {}
+    return 999
+}
+
 function Download-Model($hfUrl, $msUrl, $dest, $label) {
     # Пробуем HF + зеркала через Download-File
     if (Download-File $hfUrl $dest $label) { return $true }
@@ -211,7 +230,7 @@ function Download-Model($hfUrl, $msUrl, $dest, $label) {
 # MODEL CATALOG  (hf= HuggingFace,  ms= ModelScope)
 # Размеры в байтах взяты из ModelScope (SHA256 верифицированы)
 # =============================================================================
-function Select-BestModel($vramMb, $deployMode) {
+function Select-BestModel($vramMb, $deployMode, $freeVramMb = 0, $freeDiskGb = 999) {
     if ($deployMode -eq "code") {
         return [PSCustomObject]@{
             name="kodify-2b-q8"; file="kodify-2b-q8.gguf"; minVram=3000; sizeGb=2.1
@@ -224,7 +243,8 @@ function Select-BestModel($vramMb, $deployMode) {
     if ($deployMode -eq "voice") { $specialMb = 700 }
     if ($deployMode -eq "doc")   { $specialMb = 100 }
     if ($deployMode -eq "full")  { $specialMb = 700 }
-    $budget = $vramMb - 1200 - $specialMb
+    $effectiveVram = if ($freeVramMb -gt 200) { $freeVramMb } else { [int]($vramMb * 0.80) }
+    $budget = $effectiveVram - 800 - $specialMb
  
     # ms-URL формат: https://modelscope.cn/models/{owner}/{repo}/resolve/master/{file}
     $MS = "https://modelscope.cn/models"
@@ -350,6 +370,17 @@ function Select-BestModel($vramMb, $deployMode) {
     )
  
     $best = $catalog | Where-Object { $_.minVram -le $budget } | Select-Object -First 1
+    if (-not $best) {
+        Write-Host "  WARNING: budget ${budget}MB too low, using smallest" -ForegroundColor Yellow
+        $best = $catalog | Select-Object -Last 1
+    }
+    if ($freeDiskGb -lt 990) {
+        $best = $catalog | Where-Object { $_.minVram -le $budget -and $_.sizeGb -le ($freeDiskGb - 1.5) } | Select-Object -First 1
+        if (-not $best) {
+            Write-Host "  WARN: disk ${freeDiskGb}GB free. Trying smallest model..." -ForegroundColor Red
+            $best = $catalog | Where-Object { $_.sizeGb -le ($freeDiskGb - 1.5) } | Sort-Object sizeGb | Select-Object -First 1
+        }
+    }
     if (-not $best) {
         Write-Host "  WARNING: budget ${budget}MB too low, using smallest" -ForegroundColor Yellow
         $best = $catalog | Select-Object -Last 1
@@ -735,7 +766,7 @@ function Wait-ServiceReady($port, $label, $timeoutSec) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM DEPLOY f (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM DEPLOY ff (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
 
     Invoke-Stop
     New-Item -ItemType Directory -Path "$W\models" -Force | Out-Null
@@ -818,8 +849,9 @@ function Invoke-Deploy {
     $devLines | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
     $allDevices = @()
     foreach ($line in $devLines) {
-        if ($line -match "^\s*([A-Za-z]+\d+):\s*(.+?)\((\d+)\s*MiB") {
-            $allDevices += [PSCustomObject]@{ name=$Matches[1]; label=$Matches[2]; vram=[int]$Matches[3] }
+        if ($line -match "^\s*([A-Za-z]+\d+):\s*(.+?)\((\d+)\s*MiB(?:,\s*(\d+)\s*MiB\s*free)?") {
+            $freeV = if ($Matches[4]) { [int]$Matches[4] } else { [int]($Matches[3] * 0.80) }
+            $allDevices += [PSCustomObject]@{ name=$Matches[1]; label=$Matches[2]; vram=[int]$Matches[3]; freeVram=$freeV }
         }
     }
     $allDevices = @($allDevices | Sort-Object @{Expression={if($_.label -match "RTX"){0}else{1}}}, @{Expression={-$_.vram}})
@@ -830,18 +862,44 @@ function Invoke-Deploy {
     if ($sel.Count -eq 0 -and $allDevices.Count -gt 0) { $sel = @($allDevices | Select-Object -First 1) }
     $totalVram  = ($sel | Measure-Object -Property vram -Sum).Sum
     $deviceList = ($sel | ForEach-Object { $_.name }) -join ","
+    $totalFreeVram = ($sel | Measure-Object -Property freeVram -Sum).Sum
+    Write-Host "  Free VRAM: $totalFreeVram MiB | Total: $totalVram MiB" -ForegroundColor $(if ($totalFreeVram -lt ($totalVram * 0.3)) {"Red"} else {"Green"})
     $deviceArg  = if ($deviceList) { "--device $deviceList" } else { "" }
     Write-Host "  Using: $deviceList | Total VRAM: $totalVram MiB" -ForegroundColor Green
 
     # [5] Model
     Write-Host "[5/8] Selecting LLM (mode=$Mode, vram=$totalVram MiB)..." -ForegroundColor Yellow
-    $candidate = Select-BestModel $totalVram $Mode
+    $freeDisk = Get-FreeSpaceGb $W
+    $freeRam  = Get-FreeRamGb
+    Write-Host "  Disk free: ${freeDisk}GB | RAM free: ${freeRam}GB" -ForegroundColor $(if ($freeDisk -lt 3) {"Red"} elseif ($freeDisk -lt 6) {"Yellow"} else {"Gray"})
+
+    # RAM предупреждения по режиму
+    $minRam = @{ chat=2; voice=4; doc=6; full=8 }[$Mode]
+    if ($freeRam -lt $minRam) {
+        Write-Host "  WARN: mode=$Mode requires ~${minRam}GB free RAM, only ${freeRam}GB available. May OOM." -ForegroundColor Red
+    }
+
+    $candidate = Select-BestModel $totalVram $Mode $totalFreeVram $freeDisk
+
     $ctxSize   = Get-CtxSize $totalVram
     Write-Host "  Selected: $($candidate.name) | minVram: $($candidate.minVram)MB | ctx: $ctxSize" -ForegroundColor Cyan
     $m = "$W\models\$($candidate.file)"
     if ((Test-Path $m) -and (Get-Item $m -EA SilentlyContinue).Length -gt 100MB) {
         Write-Host "  Model cached: $($candidate.name) ($([math]::Round((Get-Item $m).Length/1MB))MB)" -ForegroundColor Green
     } else {
+        $freeDiskNow = Get-FreeSpaceGb $W
+        $needed = $candidate.sizeGb + 1.0
+        if ($freeDiskNow -lt $needed) {
+            Write-Host "  ERROR: need ${needed}GB, only ${freeDiskNow}GB free on disk!" -ForegroundColor Red
+            $candidate = Select-BestModel $totalVram $Mode $totalFreeVram ($freeDiskNow - 0.5)
+            $m = "$W\models\$($candidate.file)"
+            Write-Host "  Fallback to $($candidate.name) ($($candidate.sizeGb) GB)" -ForegroundColor Yellow
+            $freeDiskNow = Get-FreeSpaceGb $W
+            if ($freeDiskNow -lt ($candidate.sizeGb + 0.5)) {
+                Write-Host "  FATAL: not enough disk for any model. Free at least 2GB." -ForegroundColor Red
+                exit 1
+            }
+        }
         Write-Host "  Downloading $($candidate.name) ($($candidate.sizeGb) GB)..." -ForegroundColor Yellow
         $hfUrl = if ($candidate.hf -notmatch "\?") { "$($candidate.hf)?download=true" } else { $candidate.hf }
         $ok = Download-Model $hfUrl $candidate.ms $m $candidate.name
