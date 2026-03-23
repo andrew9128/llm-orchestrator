@@ -117,10 +117,42 @@ function Install-Pkg($pkgId, $label) {
 function Download-File($url, $dest, $label) {
     Remove-Item $dest -EA SilentlyContinue
     Write-Host "  Downloading $label..." -ForegroundColor Cyan
-    & curl.exe -L --retry 3 --retry-delay 5 "$url" -o "$dest"
+ 
+    # Определить прокси-аргументы
+    $proxyArgs = @()
+    $sysProxy = [System.Net.WebRequest]::GetSystemWebProxy()
+    if ($sysProxy) {
+        $proxyUri = $sysProxy.GetProxy([uri]$url)
+        if ($proxyUri -and $proxyUri.AbsoluteUri -ne $url) {
+            $proxyArgs = @("--proxy", $proxyUri.AbsoluteUri)
+            Write-Host "  Using system proxy: $($proxyUri.AbsoluteUri)" -ForegroundColor Gray
+        }
+    }
+ 
+    # Попытка 1: оригинальный URL (HuggingFace)
+    & curl.exe -L --retry 3 --retry-delay 5 --connect-timeout 60 --max-time 3600 `
+        --ssl-no-revoke -H "User-Agent: Mozilla/5.0" `
+        @proxyArgs "$url" -o "$dest"
     if ((Test-Path $dest) -and (Get-Item $dest).Length -gt 1KB) {
         Write-Host "  OK!" -ForegroundColor Green; return $true
     }
+    Remove-Item $dest -EA SilentlyContinue
+ 
+    # Попытка 2: hf-mirror.com
+    $mirror1 = $url -replace "huggingface\.co","hf-mirror.com"
+    if ($mirror1 -ne $url) {
+        Write-Host "  Trying hf-mirror.com..." -ForegroundColor Yellow
+        & curl.exe -L --retry 3 --retry-delay 5 --connect-timeout 60 --max-time 3600 `
+            --ssl-no-revoke -H "User-Agent: Mozilla/5.0" `
+            @proxyArgs "$mirror1" -o "$dest"
+        if ((Test-Path $dest) -and (Get-Item $dest).Length -gt 1KB) {
+            Write-Host "  OK (hf-mirror)!" -ForegroundColor Green; return $true
+        }
+        Remove-Item $dest -EA SilentlyContinue
+    }
+ 
+    # Попытка 3: ModelScope (URL передаётся снаружи через $msUrl)
+    # (см. Select-BestModel — каждая модель имеет msUrl)
     return $false
 }
 
@@ -148,40 +180,175 @@ function Get-CtxSize($vramMb) {
     return 8192
 }
 
+function Download-Model($hfUrl, $msUrl, $dest, $label) {
+    # Пробуем HF + зеркала через Download-File
+    if (Download-File $hfUrl $dest $label) { return $true }
+ 
+    # Попытка 4: ModelScope
+    if ($msUrl) {
+        Write-Host "  Trying ModelScope..." -ForegroundColor Yellow
+        $proxyArgs = @()
+        $sysProxy = [System.Net.WebRequest]::GetSystemWebProxy()
+        if ($sysProxy) {
+            $proxyUri = $sysProxy.GetProxy([uri]$msUrl)
+            if ($proxyUri -and $proxyUri.AbsoluteUri -ne $msUrl) {
+                $proxyArgs = @("--proxy", $proxyUri.AbsoluteUri)
+            }
+        }
+        & curl.exe -L --retry 3 --retry-delay 5 --connect-timeout 60 --max-time 3600 `
+            --ssl-no-revoke -H "User-Agent: Mozilla/5.0" `
+            @proxyArgs "$msUrl" -o "$dest"
+        if ((Test-Path $dest) -and (Get-Item $dest).Length -gt 1KB) {
+            Write-Host "  OK (ModelScope)!" -ForegroundColor Green; return $true
+        }
+        Remove-Item $dest -EA SilentlyContinue
+    }
+ 
+    return $false
+}
+
+# =============================================================================
+# MODEL CATALOG  (hf= HuggingFace,  ms= ModelScope)
+# Размеры в байтах взяты из ModelScope (SHA256 верифицированы)
+# =============================================================================
 function Select-BestModel($vramMb, $deployMode) {
     if ($deployMode -eq "code") {
-        return [PSCustomObject]@{ name="kodify-2b-q8"; file="kodify-2b-q8.gguf"; minVram=3000
-            url="https://huggingface.co/mradermacher/Kodify-Nano-2.0-GGUF/resolve/main/Kodify-Nano-2.0.Q8_0.gguf" }
+        return [PSCustomObject]@{
+            name="kodify-2b-q8"; file="kodify-2b-q8.gguf"; minVram=3000; sizeGb=2.1
+            hf="https://huggingface.co/mradermacher/Kodify-Nano-2.0-GGUF/resolve/main/Kodify-Nano-2.0.Q8_0.gguf"
+            ms=$null
+        }
     }
+ 
     $specialMb = 0
     if ($deployMode -eq "voice") { $specialMb = 700 }
     if ($deployMode -eq "doc")   { $specialMb = 100 }
     if ($deployMode -eq "full")  { $specialMb = 700 }
     $budget = $vramMb - 1200 - $specialMb
+ 
+    # ms-URL формат: https://modelscope.cn/models/{owner}/{repo}/resolve/master/{file}
+    $MS = "https://modelscope.cn/models"
+ 
     $catalog = @(
-        [PSCustomObject]@{ name="t-lite-2.1-q8";  file="t-lite-2.1-q8.gguf";  minVram=10000; url="https://huggingface.co/t-tech/T-lite-it-2.1-GGUF/resolve/main/T-lite-it-2.1-Q8_0.gguf" }
-        [PSCustomObject]@{ name="t-lite-2.1-q6";  file="t-lite-2.1-q6.gguf";  minVram=8200;  url="https://huggingface.co/t-tech/T-lite-it-2.1-GGUF/resolve/main/T-lite-it-2.1-Q6_K.gguf" }
-        [PSCustomObject]@{ name="t-lite-2.1-q5";  file="t-lite-2.1-q5.gguf";  minVram=6500;  url="https://huggingface.co/t-tech/T-lite-it-2.1-GGUF/resolve/main/T-lite-it-2.1-Q5_K_M.gguf" }
-        [PSCustomObject]@{ name="t-lite-2.1-q4";  file="t-lite-2.1-q4.gguf";  minVram=5200;  url="https://huggingface.co/t-tech/T-lite-it-2.1-GGUF/resolve/main/T-lite-it-2.1-Q4_K_M.gguf" }
-        [PSCustomObject]@{ name="t-pro-2.0-q8";   file="t-pro-2.0-q8.gguf";   minVram=36000; url="https://huggingface.co/t-tech/T-pro-it-2.0-GGUF/resolve/main/T-pro-it-2.0-Q8_0.gguf" }
-        [PSCustomObject]@{ name="t-pro-2.0-q6";   file="t-pro-2.0-q6.gguf";   minVram=27000; url="https://huggingface.co/t-tech/T-pro-it-2.0-GGUF/resolve/main/T-pro-it-2.0-Q6_K.gguf" }
-        [PSCustomObject]@{ name="t-pro-2.0-q5";   file="t-pro-2.0-q5.gguf";   minVram=23000; url="https://huggingface.co/t-tech/T-pro-it-2.0-GGUF/resolve/main/T-pro-it-2.0-Q5_K_M.gguf" }
-        [PSCustomObject]@{ name="t-pro-2.0-q4";   file="t-pro-2.0-q4.gguf";   minVram=19000; url="https://huggingface.co/t-tech/T-pro-it-2.0-GGUF/resolve/main/T-pro-it-2.0-Q4_K_M.gguf" }
-        [PSCustomObject]@{ name="saiga-gem12-q8";  file="saiga-gem12-q8.gguf";  minVram=14500; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q8_0.gguf" }
-        [PSCustomObject]@{ name="saiga-gem12-q6";  file="saiga-gem12-q6.gguf";  minVram=11000; url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q6_K.gguf" }
-        [PSCustomObject]@{ name="saiga-gem12-q5";  file="saiga-gem12-q5.gguf";  minVram=9500;  url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q5_K_M.gguf" }
-        [PSCustomObject]@{ name="saiga-gem12-q4";  file="saiga-gem12-q4.gguf";  minVram=7800;  url="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q4_K_M.gguf" }
-        [PSCustomObject]@{ name="saiga-nem12-q6";  file="saiga-nem12-q6.gguf";  minVram=11000; url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q6_K.gguf" }
-        [PSCustomObject]@{ name="saiga-nem12-q5";  file="saiga-nem12-q5.gguf";  minVram=9500;  url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q5_K_M.gguf" }
-        [PSCustomObject]@{ name="saiga-nem12-q4";  file="saiga-nem12-q4.gguf";  minVram=7800;  url="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q4_K_M.gguf" }
-        [PSCustomObject]@{ name="yagpt-8b-q8";     file="yagpt-8b-q8.gguf";     minVram=10000; url="https://huggingface.co/yandex/YandexGPT-5-Lite-8B-GGUF/resolve/main/YandexGPT-5-Lite-8B-instruct-Q8_0.gguf" }
-        [PSCustomObject]@{ name="yagpt-8b-q4";     file="yagpt-8b-q4.gguf";     minVram=5200;  url="https://huggingface.co/yandex/YandexGPT-5-Lite-8B-GGUF/resolve/main/YandexGPT-5-Lite-8B-instruct-Q4_K_M.gguf" }
-        [PSCustomObject]@{ name="qvikhr-4b-q8";    file="qvikhr-4b-q8.gguf";    minVram=5200;  url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q8_0.gguf" }
-        [PSCustomObject]@{ name="qvikhr-4b-q5";    file="qvikhr-4b-q5.gguf";    minVram=4000;  url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q5_0.gguf" }
-        [PSCustomObject]@{ name="qvikhr-4b-q4";    file="qvikhr-4b-q4.gguf";    minVram=3400;  url="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q4_K_M.gguf" }
-        [PSCustomObject]@{ name="qvikhr-1b-q8";    file="qvikhr-1b-q8.gguf";    minVram=2200;  url="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruction-GGUF/resolve/main/QVikhr-3-1.7B-Instruction-Q8_0.gguf" }
-        [PSCustomObject]@{ name="qvikhr-1b-q4";    file="qvikhr-1b-q4.gguf";    minVram=1800;  url="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruction-GGUF/resolve/main/QVikhr-3-1.7B-Instruction-Q4_K_M.gguf" }
+        # ── T-pro 32B ──────────────────────────────────────────────────────────
+        [PSCustomObject]@{
+            name="t-pro-2.0-q8"; file="t-pro-2.0-q8.gguf"; minVram=36000; sizeGb=32.44
+            hf="https://huggingface.co/t-tech/T-pro-it-2.0-GGUF/resolve/main/T-pro-it-2.0-Q8_0.gguf"
+            ms="$MS/t-tech/T-pro-it-2.0-GGUF/resolve/master/T-pro-it-2.0-Q8_0.gguf"
+        }
+        [PSCustomObject]@{
+            name="t-pro-2.0-q6"; file="t-pro-2.0-q6.gguf"; minVram=27000; sizeGb=25.04
+            hf="https://huggingface.co/t-tech/T-pro-it-2.0-GGUF/resolve/main/T-pro-it-2.0-Q6_K.gguf"
+            ms="$MS/t-tech/T-pro-it-2.0-GGUF/resolve/master/T-pro-it-2.0-Q6_K.gguf"
+        }
+        [PSCustomObject]@{
+            name="t-pro-2.0-q5"; file="t-pro-2.0-q5.gguf"; minVram=23000; sizeGb=21.63
+            hf="https://huggingface.co/t-tech/T-pro-it-2.0-GGUF/resolve/main/T-pro-it-2.0-Q5_K_M.gguf"
+            ms="$MS/t-tech/T-pro-it-2.0-GGUF/resolve/master/T-pro-it-2.0-Q5_K_M.gguf"
+        }
+        [PSCustomObject]@{
+            name="t-pro-2.0-q4"; file="t-pro-2.0-q4.gguf"; minVram=19000; sizeGb=18.41
+            hf="https://huggingface.co/t-tech/T-pro-it-2.0-GGUF/resolve/main/T-pro-it-2.0-Q4_K_M.gguf"
+            ms="$MS/t-tech/T-pro-it-2.0-GGUF/resolve/master/T-pro-it-2.0-Q4_K_M.gguf"
+        }
+        # ── Saiga Gemma3 12B  (только HF, на ModelScope нет) ───────────────────
+        [PSCustomObject]@{
+            name="saiga-gem12-q8"; file="saiga-gem12-q8.gguf"; minVram=14500; sizeGb=13.77
+            hf="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q8_0.gguf"
+            ms=$null
+        }
+        [PSCustomObject]@{
+            name="saiga-gem12-q6"; file="saiga-gem12-q6.gguf"; minVram=11000; sizeGb=10.62
+            hf="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q6_K.gguf"
+            ms=$null
+        }
+        [PSCustomObject]@{
+            name="saiga-gem12-q5"; file="saiga-gem12-q5.gguf"; minVram=9500; sizeGb=9.26
+            hf="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q5_K_M.gguf"
+            ms=$null
+        }
+        [PSCustomObject]@{
+            name="saiga-gem12-q4"; file="saiga-gem12-q4.gguf"; minVram=7800; sizeGb=7.73
+            hf="https://huggingface.co/IlyaGusev/saiga_gemma3_12b_gguf/resolve/main/saiga_gemma3_12b.Q4_K_M.gguf"
+            ms=$null
+        }
+        # ── Saiga Nemo 12B ─────────────────────────────────────────────────────
+        [PSCustomObject]@{
+            name="saiga-nem12-q6"; file="saiga-nem12-q6.gguf"; minVram=11000; sizeGb=9.37
+            hf="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q6_K.gguf"
+            ms="$MS/QuantFactory/saiga_nemo_12b-GGUF/resolve/master/saiga_nemo_12b.Q6_K.gguf"
+        }
+        [PSCustomObject]@{
+            name="saiga-nem12-q5"; file="saiga-nem12-q5.gguf"; minVram=9500; sizeGb=8.13
+            hf="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q5_K_M.gguf"
+            ms="$MS/QuantFactory/saiga_nemo_12b-GGUF/resolve/master/saiga_nemo_12b.Q5_K_M.gguf"
+        }
+        [PSCustomObject]@{
+            name="saiga-nem12-q4"; file="saiga-nem12-q4.gguf"; minVram=7800; sizeGb=6.97
+            hf="https://huggingface.co/IlyaGusev/saiga_nemo_12b_gguf/resolve/main/saiga_nemo_12b.Q4_K_M.gguf"
+            ms="$MS/QuantFactory/saiga_nemo_12b-GGUF/resolve/master/saiga_nemo_12b.Q4_K_M.gguf"
+        }
+        # ── T-lite 2.1 8B ──────────────────────────────────────────────────────
+        [PSCustomObject]@{
+            name="t-lite-2.1-q8"; file="t-lite-2.1-q8.gguf"; minVram=10000; sizeGb=8.11
+            hf="https://huggingface.co/t-tech/T-lite-it-2.1-GGUF/resolve/main/T-lite-it-2.1-Q8_0.gguf"
+            ms="$MS/t-tech/T-lite-it-2.1-GGUF/resolve/master/T-lite-it-2.1-Q8_0.gguf"
+        }
+        [PSCustomObject]@{
+            name="t-lite-2.1-q6"; file="t-lite-2.1-q6.gguf"; minVram=8200; sizeGb=6.27
+            hf="https://huggingface.co/t-tech/T-lite-it-2.1-GGUF/resolve/main/T-lite-it-2.1-Q6_K.gguf"
+            ms="$MS/t-tech/T-lite-it-2.1-GGUF/resolve/master/T-lite-it-2.1-Q6_K.gguf"
+        }
+        [PSCustomObject]@{
+            name="t-lite-2.1-q5"; file="t-lite-2.1-q5.gguf"; minVram=6500; sizeGb=5.45
+            hf="https://huggingface.co/t-tech/T-lite-it-2.1-GGUF/resolve/main/T-lite-it-2.1-Q5_K_M.gguf"
+            ms="$MS/t-tech/T-lite-it-2.1-GGUF/resolve/master/T-lite-it-2.1-Q5_K_M.gguf"
+        }
+        [PSCustomObject]@{
+            name="t-lite-2.1-q4"; file="t-lite-2.1-q4.gguf"; minVram=5200; sizeGb=4.68
+            hf="https://huggingface.co/t-tech/T-lite-it-2.1-GGUF/resolve/main/T-lite-it-2.1-Q4_K_M.gguf"
+            ms="$MS/t-tech/T-lite-it-2.1-GGUF/resolve/master/T-lite-it-2.1-Q4_K_M.gguf"
+        }
+        # ── YandexGPT 5 Lite 8B ────────────────────────────────────────────────
+        [PSCustomObject]@{
+            name="yagpt-8b-q8"; file="yagpt-8b-q8.gguf"; minVram=10000; sizeGb=8.19
+            hf="https://huggingface.co/yandex/YandexGPT-5-Lite-8B-GGUF/resolve/main/YandexGPT-5-Lite-8B-instruct-Q8_0.gguf"
+            ms=$null
+        }
+        [PSCustomObject]@{
+            name="yagpt-8b-q4"; file="yagpt-8b-q4.gguf"; minVram=5200; sizeGb=4.58
+            hf="https://huggingface.co/yandex/YandexGPT-5-Lite-8B-GGUF/resolve/main/YandexGPT-5-Lite-8B-instruct-Q4_K_M.gguf"
+            ms="$MS/yandex/YandexGPT-5-Lite-8B-instruct-GGUF/resolve/master/YandexGPT-5-Lite-8B-instruct-Q4_K_M.gguf"
+        }
+        # ── QVikhr 4B ──────────────────────────────────────────────────────────
+        [PSCustomObject]@{
+            name="qvikhr-4b-q8"; file="qvikhr-4b-q8.gguf"; minVram=5200; sizeGb=3.99
+            hf="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q8_0.gguf"
+            ms="$MS/prithivMLmods/QVikhr-3-4B-it-F32-GGUF/resolve/master/QVikhr-3-4B-it-F32-Q8_0.gguf"
+        }
+        [PSCustomObject]@{
+            name="qvikhr-4b-q5"; file="qvikhr-4b-q5.gguf"; minVram=4000; sizeGb=2.69
+            hf="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q5_0.gguf"
+            ms="$MS/prithivMLmods/QVikhr-3-4B-it-F32-GGUF/resolve/master/QVikhr-3-4B-it-F32-Q5_0.gguf"
+        }
+        [PSCustomObject]@{
+            name="qvikhr-4b-q4"; file="qvikhr-4b-q4.gguf"; minVram=3400; sizeGb=2.33
+            hf="https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q4_K_M.gguf"
+            ms="$MS/prithivMLmods/QVikhr-3-4B-it-F32-GGUF/resolve/master/QVikhr-3-4B-it-F32-Q4_K_M.gguf"
+        }
+        # ── QVikhr 1.7B ────────────────────────────────────────────────────────
+        [PSCustomObject]@{
+            name="qvikhr-1b-q8"; file="qvikhr-1b-q8.gguf"; minVram=2200; sizeGb=1.71
+            hf="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruction-GGUF/resolve/main/QVikhr-3-1.7B-Instruction-Q8_0.gguf"
+            ms="$MS/Vikhrmodels/QVikhr-3-1.7B-Instruction-noreasoning-GGUF/resolve/master/QVikhr-3-1.7B-Instruction-noreasoning-Q8_0.gguf"
+        }
+        [PSCustomObject]@{
+            name="qvikhr-1b-q4"; file="qvikhr-1b-q4.gguf"; minVram=1800; sizeGb=0.98
+            hf="https://huggingface.co/Vikhrmodels/QVikhr-3-1.7B-Instruction-GGUF/resolve/main/QVikhr-3-1.7B-Instruction-Q4_K_M.gguf"
+            ms="$MS/Vikhrmodels/QVikhr-3-1.7B-Instruction-noreasoning-GGUF/resolve/master/QVikhr-3-1.7B-Instruction-noreasoning-Q4_K_M.gguf"
+        }
     )
+ 
     $best = $catalog | Where-Object { $_.minVram -le $budget } | Select-Object -First 1
     if (-not $best) {
         Write-Host "  WARNING: budget ${budget}MB too low, using smallest" -ForegroundColor Yellow
@@ -568,7 +735,7 @@ function Wait-ServiceReady($port, $label, $timeoutSec) {
 # DEPLOY
 # =============================================================================
 function Invoke-Deploy {
-    Write-Host "--- LLM DEPLOY (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
+    Write-Host "--- LLM DEPLOY f (GPUs: $Gpus, Mode: $Mode) ---" -ForegroundColor Cyan
 
     Invoke-Stop
     New-Item -ItemType Directory -Path "$W\models" -Force | Out-Null
@@ -675,16 +842,20 @@ function Invoke-Deploy {
     if ((Test-Path $m) -and (Get-Item $m -EA SilentlyContinue).Length -gt 100MB) {
         Write-Host "  Model cached: $($candidate.name) ($([math]::Round((Get-Item $m).Length/1MB))MB)" -ForegroundColor Green
     } else {
-        Write-Host "  Downloading $($candidate.name)..." -ForegroundColor Yellow
-        $dlUrl = if ($candidate.url -notmatch "\?") { "$($candidate.url)?download=true" } else { $candidate.url }
-        Download-File $dlUrl $m $($candidate.name) | Out-Null
-        if (-not (Test-Path $m) -or (Get-Item $m).Length -lt 100MB) {
+        Write-Host "  Downloading $($candidate.name) ($($candidate.sizeGb) GB)..." -ForegroundColor Yellow
+        $hfUrl = if ($candidate.hf -notmatch "\?") { "$($candidate.hf)?download=true" } else { $candidate.hf }
+        $ok = Download-Model $hfUrl $candidate.ms $m $candidate.name
+        if (-not $ok) {
             Remove-Item $m -EA SilentlyContinue
-            Write-Host "  Download failed - emergency fallback..." -ForegroundColor Red
+            Write-Host "  All sources failed - emergency fallback qvikhr-4b-q4..." -ForegroundColor Red
             $m = "$W\models\qvikhr-4b-q4.gguf"
-            Download-File "https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q4_K_M.gguf?download=true" $m "qvikhr-4b-q4" | Out-Null
-            if (-not (Test-Path $m) -or (Get-Item $m).Length -lt 100MB) {
-                Write-Host "FAILED: cannot download model." -ForegroundColor Red; exit 1
+            $MS = "https://modelscope.cn/models"
+            $ok = Download-Model `
+                "https://huggingface.co/Vikhrmodels/QVikhr-3-4B-Instruction-GGUF/resolve/main/QVikhr-3-4B-Instruction-Q4_K_M.gguf?download=true" `
+                "$MS/prithivMLmods/QVikhr-3-4B-it-F32-GGUF/resolve/master/QVikhr-3-4B-it-F32-Q4_K_M.gguf" `
+                $m "qvikhr-4b-q4 (emergency)"
+            if (-not $ok) {
+                Write-Host "FAILED: cannot download model from any source." -ForegroundColor Red; exit 1
             }
         }
         Write-Host "  Downloaded: $([math]::Round((Get-Item $m).Length/1MB))MB" -ForegroundColor Green
