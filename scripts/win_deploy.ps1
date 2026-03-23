@@ -1,6 +1,6 @@
 # LLM WIN DEPLOY
 # Modes: chat | voice | doc | full | code
-# Ports: LLM 8010->18010  ASR 8011->18011  OCR 8013->18013  Embed 8014->18014
+# Ports: LLM 47010->47110  ASR 47011->47111  OCR 47013->47113  Embed 47014->47114
 # All services: wake on demand, sleep on idle, via proxy
 param(
     [string]$Action = "--deploy",
@@ -37,7 +37,7 @@ function Invoke-Stop {
     } | ForEach-Object {
         Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue
     }
-    foreach ($port in 8010, 8011, 8013, 8014, 18010, 18011, 18013, 18014) {
+    foreach ($port in 47010, 47011, 47013, 47014, 47110, 47111, 47113, 47114) {
         try {
             $conn = Get-NetTCPConnection -LocalPort $port -EA SilentlyContinue | Where-Object State -eq "Listen" | Select-Object -First 1
             if ($conn -and $conn.OwningProcess -gt 4) {
@@ -57,12 +57,12 @@ function Invoke-Stop {
 function Invoke-Status {
     Write-Host "--- LLM ORCHESTRATOR STATUS ---" -ForegroundColor Cyan
     $portMap = @{
-        8010="LLM"
-        8011="ASR (GigaAM-v3 ONNX)"
-        8013="OCR (RapidOCR ONNX)"
-        8014="Embed (multilingual-e5 ONNX)"
+        47010="LLM"
+        47011="ASR (GigaAM-v3 ONNX)"
+        47013="OCR (RapidOCR ONNX)"
+        47014="Embed (multilingual-e5 ONNX)"
     }
-    foreach ($port in 8010, 8011, 8013, 8014) {
+    foreach ($port in 47010, 47011, 47013, 47014) {
         $st = ""
         try {
             $r = [System.Net.HttpWebRequest]::Create("http://localhost:$port/health")
@@ -609,7 +609,7 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8'); self.end_headers()
         self.wfile.write(json.dumps({'text': text}, ensure_ascii=False).encode('utf-8'))
 
-HTTPServer(('0.0.0.0', 18011), H).serve_forever()
+HTTPServer(('0.0.0.0', 47111), H).serve_forever()
 "@
     $script | Out-File "$W\asr_service.py" -Encoding UTF8
 }
@@ -672,7 +672,7 @@ function Write-OcrService {
         "        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()",
         "        self.wfile.write(json.dumps({'text': text}).encode('utf-8'))",
         "threading.Thread(target=load_model, daemon=True).start()",
-        "HTTPServer(('0.0.0.0', 18013), H).serve_forever()"
+        "HTTPServer(('0.0.0.0', 47113), H).serve_forever()"
     )
     $lines -join "`n" | Out-File "$W\ocr_service.py" -Encoding UTF8 -NoNewline
 }
@@ -724,7 +724,7 @@ class H(BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(msg))); self.end_headers()
             self.wfile.write(msg)
 
-HTTPServer(('0.0.0.0', 18014), H).serve_forever()
+HTTPServer(('0.0.0.0', 47114), H).serve_forever()
 "@
     $script | Out-File "$W\embed_service.py" -Encoding UTF8
 }
@@ -976,14 +976,14 @@ function Invoke-Deploy {
 import subprocess
 subprocess.run([
     r'$exeEsc', '--model', r'$mEsc',
-    '--port', '18010', '--n-gpu-layers', '99',
+    '--port', '47110', '--n-gpu-layers', '99',
     '--ctx-size', '$ctxSize', '--host', '0.0.0.0',
     '--alias', '$($candidate.name)', '--no-warmup'
 ])
 "@ | Out-File "$W\run_llm.py" -Encoding UTF8
 
     # keep run.ps1 for ctx-size reduction on crash (used by proxy restart logic)
-    $cmd = "Set-Location `"$binDir`"; .\llama-server.exe --model `"$m`" --port 18010 --n-gpu-layers 99 --ctx-size $ctxSize --host 0.0.0.0 $deviceArg --alias `"$($candidate.name)`" --no-warmup > `"$W\server.log`" 2>&1"
+    $cmd = "Set-Location `"$binDir`"; .\llama-server.exe --model `"$m`" --port 47110 --n-gpu-layers 99 --ctx-size $ctxSize --host 0.0.0.0 $deviceArg --alias `"$($candidate.name)`" --no-warmup > `"$W\server.log`" 2>&1"
     [System.IO.File]::WriteAllText("$W\run.ps1", $cmd, [System.Text.UTF8Encoding]::new($false))
 
     if ($launchAsr)   { Write-AsrService }
@@ -991,24 +991,24 @@ subprocess.run([
     if ($launchEmbed) { Write-EmbedService }
 
     # Start LLM proxy (proxy will start llama on first request)
-    Start-Process "python" -ArgumentList $proxyScript, "8010", "18010", "LLM", "$W\run_llm.py", $W, $IDLE_LLM `
-        -WindowStyle Hidden -RedirectStandardOutput "$W\proxy_8010.log" -RedirectStandardError "$W\proxy_8010_err.log"
+    Start-Process "python" -ArgumentList $proxyScript, "47010", "47110", "LLM", "$W\run_llm.py", $W, $IDLE_LLM `
+        -WindowStyle Hidden -RedirectStandardOutput "$W\proxy_47010.log" -RedirectStandardError "$W\proxy_47010_err.log"
     Write-Host "  [LLM]   Proxy started (wakes on first request, idle=${IDLE_LLM}s)" -ForegroundColor Green
 
     # Start special service proxies
     if ($launchAsr) {
-        Start-Process "python" -ArgumentList $proxyScript, "8011", "18011", "ASR", "$W\asr_service.py", $W, $IDLE_ASR `
-            -WindowStyle Hidden -RedirectStandardOutput "$W\proxy_8011.log" -RedirectStandardError "$W\proxy_8011_err.log"
+        Start-Process "python" -ArgumentList $proxyScript, "47011", "47111", "ASR", "$W\asr_service.py", $W, $IDLE_ASR `
+            -WindowStyle Hidden -RedirectStandardOutput "$W\proxy_47011.log" -RedirectStandardError "$W\proxy_47011_err.log"
         Write-Host "  [ASR]   Proxy started (idle=${IDLE_ASR}s)" -ForegroundColor Green
     }
     if ($launchOcr) {
-        Start-Process "python" -ArgumentList $proxyScript, "8013", "18013", "OCR", "$W\ocr_service.py", $W, $IDLE_OCR `
-            -WindowStyle Hidden -RedirectStandardOutput "$W\proxy_8013.log" -RedirectStandardError "$W\proxy_8013_err.log"
+        Start-Process "python" -ArgumentList $proxyScript, "47013", "47113", "OCR", "$W\ocr_service.py", $W, $IDLE_OCR `
+            -WindowStyle Hidden -RedirectStandardOutput "$W\proxy_47013.log" -RedirectStandardError "$W\proxy_47013_err.log"
         Write-Host "  [OCR]   Proxy started (idle=${IDLE_OCR}s)" -ForegroundColor Green
     }
     if ($launchEmbed) {
-        Start-Process "python" -ArgumentList $proxyScript, "8014", "18014", "Embed", "$W\embed_service.py", $W, $IDLE_EMBED `
-            -WindowStyle Hidden -RedirectStandardOutput "$W\proxy_8014.log" -RedirectStandardError "$W\proxy_8014_err.log"
+        Start-Process "python" -ArgumentList $proxyScript, "47014", "47114", "Embed", "$W\embed_service.py", $W, $IDLE_EMBED `
+            -WindowStyle Hidden -RedirectStandardOutput "$W\proxy_47014.log" -RedirectStandardError "$W\proxy_47014_err.log"
         Write-Host "  [Embed] Proxy started (idle=${IDLE_EMBED}s)" -ForegroundColor Green
     }
 
@@ -1025,10 +1025,10 @@ subprocess.run([
     Write-Host "  Model:   $($candidate.name)"           -ForegroundColor Green
     Write-Host "  GPUs:    $deviceList ($totalVram MiB)" -ForegroundColor Green
     Write-Host "  Context: $ctxSize tokens"              -ForegroundColor Green
-    Write-Host "  LLM:     http://localhost:8010/v1  (sleeping - wakes on request)" -ForegroundColor Green
-    if ($launchAsr)   { Write-Host "  ASR:     http://localhost:8011" -ForegroundColor Cyan }
-    if ($launchOcr)   { Write-Host "  OCR:     http://localhost:8013" -ForegroundColor Cyan }
-    if ($launchEmbed) { Write-Host "  Embed:   http://localhost:8014" -ForegroundColor Cyan }
+    Write-Host "  LLM:     http://localhost:47010/v1  (sleeping - wakes on request)" -ForegroundColor Green
+    if ($launchAsr)   { Write-Host "  ASR:     http://localhost:47011" -ForegroundColor Cyan }
+    if ($launchOcr)   { Write-Host "  OCR:     http://localhost:47013" -ForegroundColor Cyan }
+    if ($launchEmbed) { Write-Host "  Embed:   http://localhost:47014" -ForegroundColor Cyan }
     Write-Host ""
     Write-Host ("  Idle timeouts: LLM={0}s  ASR={1}s  OCR={2}s  Embed={3}s" -f $IDLE_LLM, $IDLE_ASR, $IDLE_OCR, $IDLE_EMBED) -ForegroundColor Gray
     Write-Host "  Stop:    powershell -EP Bypass -File win_deploy.ps1 --stop"   -ForegroundColor Gray
